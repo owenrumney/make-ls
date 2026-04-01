@@ -1,0 +1,60 @@
+{
+  "name": "make-ls",
+  "displayName": "Makefile Language Server",
+  "description": "Language server for Makefiles — hover, completion, go-to-definition, references, diagnostics, symbols, formatting, and code actions.",
+  "version": "0.1.0",
+  "publisher": "owenrumney",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/owenrumney/make-ls"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:makefile"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "makefile",
+        "aliases": [
+          "Makefile",
+          "makefile"
+        ],
+        "filenames": [
+          "Makefile",
+          "makefile",
+          "GNUmakefile"
+        ],
+        "extensions": [
+          ".mk",
+          ".mak"
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "watch": "npm run compile -- --watch",
+    "package": "npm run compile && node scripts/package.js",
+    "vscode:prepublish": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --minify"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.27.4",
+    "typescript": "^5.0.0"
+  }
+}

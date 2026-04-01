@@ -1,0 +1,9 @@
+bin/
+dist/
+coverage.out
+
+# VS Code extension
+vscode-make-ls/node_modules/
+vscode-make-ls/out/
+vscode-make-ls/bin/
+vscode-make-ls/*.vsix

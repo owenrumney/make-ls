@@ -1,0 +1,49 @@
+version: 2
+
+project_name: make-ls
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - main: ./cmd/make-ls
+    binary: make-ls
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: vsix
+    format: binary
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    meta: true
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+release:
+  extra_files:
+    - glob: vscode-make-ls/*.vsix

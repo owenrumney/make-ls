@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="128" height="128" rx="20" ry="20" fill="url(#bg)"/>
+
+  <!-- Cog: 8 teeth around a circle -->
+  <g transform="translate(64,64)">
+    <path d="
+      M-8,-52 L8,-52 L10,-42 A36,36 0 0,1 20,-38
+      L28,-46 L40,-34 L32,-26 A36,36 0 0,1 36,-16
+      L46,-14 L46,8 L36,10 A36,36 0 0,1 32,20
+      L40,28 L28,40 L20,32 A36,36 0 0,1 10,36
+      L8,46 L-8,46 L-10,36 A36,36 0 0,1 -20,32
+      L-28,40 L-40,28 L-32,20 A36,36 0 0,1 -36,10
+      L-46,8 L-46,-14 L-36,-16 A36,36 0 0,1 -32,-26
+      L-40,-34 L-28,-46 L-20,-38 A36,36 0 0,1 -10,-42
+      Z"
+      fill="#e94560" opacity="0.9"/>
+    <!-- Inner circle cutout -->
+    <circle cx="0" cy="0" r="24" fill="url(#bg)"/>
+  </g>
+
+  <!-- "M" in the center -->
+  <text x="64" y="66" font-family="'SF Mono','Menlo','Consolas',monospace" font-weight="800" font-size="32"
+        fill="#e8e8e8" text-anchor="middle" dominant-baseline="central">M</text>
+</svg>

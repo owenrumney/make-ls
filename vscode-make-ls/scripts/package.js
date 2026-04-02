@@ -13,6 +13,13 @@ const targets = [
   { goos: "linux", goarch: "arm64", vscodeTarget: "linux-arm64" },
 ];
 
+// Copy README from repo root so vsce includes it in the .vsix.
+const readmeSrc = path.join(ROOT, "README.md");
+const readmeDst = path.join(EXT_DIR, "README.md");
+if (fs.existsSync(readmeSrc)) {
+  fs.copyFileSync(readmeSrc, readmeDst);
+}
+
 // Allow building a single target via env var.
 const only = process.env.VSCE_TARGET;
 
@@ -50,9 +57,12 @@ for (const t of targets) {
   });
 }
 
-// Clean up bin dir after packaging.
+// Clean up build artifacts.
 if (fs.existsSync(BIN_DIR)) {
   fs.rmSync(BIN_DIR, { recursive: true });
+}
+if (fs.existsSync(readmeDst)) {
+  fs.unlinkSync(readmeDst);
 }
 
 console.log("\nDone. .vsix files:");
@@ -60,4 +70,39 @@ const vsixFiles = fs.readdirSync(EXT_DIR).filter((f) => f.endsWith(".vsix"));
 for (const f of vsixFiles) {
   const stat = fs.statSync(path.join(EXT_DIR, f));
   console.log(`  ${f} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
+}
+
+// Publish to VS Code Marketplace.
+if (process.env.VSCODE_PUBLISH_TOKEN) {
+  console.log("\nPublishing to VS Code Marketplace...");
+  for (const f of vsixFiles) {
+    const vsixPath = path.join(EXT_DIR, f);
+    console.log(`  ${f}`);
+    execSync(`npx vsce publish --pat ${process.env.VSCODE_PUBLISH_TOKEN} --packagePath ${vsixPath}`, {
+      cwd: EXT_DIR,
+      stdio: "inherit",
+    });
+  }
+} else {
+  console.log("\nSkipping VS Code Marketplace publish (no VSCODE_PUBLISH_TOKEN).");
+}
+
+// Publish to Open VSX.
+if (process.env.OPVSX_PUBLISH_TOKEN) {
+  console.log("\nPublishing to Open VSX...");
+  for (const f of vsixFiles) {
+    const vsixPath = path.join(EXT_DIR, f);
+    console.log(`  ${f}`);
+    try {
+      execSync(`npx ovsx publish ${vsixPath} -p ${process.env.OPVSX_PUBLISH_TOKEN}`, {
+        cwd: EXT_DIR,
+        stdio: ["ignore", "inherit", "inherit"],
+        timeout: 120_000,
+      });
+    } catch (err) {
+      console.error(`  Failed to publish ${f} to Open VSX: ${err.message}`);
+    }
+  }
+} else {
+  console.log("\nSkipping Open VSX publish (no OPVSX_PUBLISH_TOKEN).");
 }

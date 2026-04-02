@@ -24,7 +24,10 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Build VS Code extensions
+      - name: Build and publish VS Code extensions
+        env:
+          VSCODE_PUBLISH_TOKEN: ${{ secrets.VSCODE_PUBLISH_TOKEN }}
+          OPVSX_PUBLISH_TOKEN: ${{ secrets.OPVSX_PUBLISH_TOKEN }}
         run: |
           cd vscode-make-ls
           npm ci

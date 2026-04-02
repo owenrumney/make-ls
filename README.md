@@ -45,6 +45,14 @@ make-ls fills the gap with actual LSP features: hover, completion, go-to-definit
 
 ## Install
 
+### Install with Go
+
+```sh
+go install github.com/owenrumney/make-ls/cmd/make-ls@latest
+```
+
+Now you can set up Neovim with the path set to `$GOPATH/bin/make-ls`
+
 ### VS Code
 
 Install from a `.vsix` file (see [Releases](https://github.com/owenrumney/make-ls/releases)):

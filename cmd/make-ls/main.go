@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/owenrumney/go-lsp/lsp"
 	"github.com/owenrumney/go-lsp/server"
 	"github.com/owenrumney/make-ls/internal/handler"
 )
@@ -21,6 +22,6 @@ func run() error {
 	defer stop()
 
 	h := handler.New()
-	srv := server.NewServer(h)
+	srv := server.NewServer(h, server.WithPositionEncoding(lsp.PositionEncodingUTF8))
 	return srv.Run(ctx, server.RunStdio())
 }

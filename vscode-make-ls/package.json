@@ -2,7 +2,7 @@
   "name": "make-ls",
   "displayName": "Makefile Language Server",
   "description": "Language server for Makefiles — hover, completion, go-to-definition, references, diagnostics, symbols, formatting, and code actions.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "owenrumney",
   "license": "MIT",
   "icon": "images/icon.png",

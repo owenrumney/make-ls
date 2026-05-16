@@ -2,7 +2,7 @@
   "name": "make-ls",
   "displayName": "Makefile Language Server",
   "description": "Language server for Makefiles — hover, completion, go-to-definition, references, diagnostics, symbols, formatting, and code actions.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "owenrumney",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -40,7 +40,17 @@
           ".mak"
         ]
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Makefile Language Server",
+      "properties": {
+        "make-ls.serverPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the `make-ls` server binary. When empty, the extension uses the bundled binary."
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --sourcemap",

@@ -67,6 +67,8 @@ Or build and install locally:
 make extension-install
 ```
 
+To override the bundled server binary in VS Code, set `make-ls.serverPath` to the absolute path of your `make-ls` executable in Settings.
+
 ### Neovim
 
 No existing Makefile LSP is available in nvim-lspconfig. To use make-ls, add a custom config:

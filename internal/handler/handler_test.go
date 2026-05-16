@@ -23,12 +23,47 @@ func TestInitializeCapabilities(t *testing.T) {
 	harness := newHarness(t)
 	caps := harness.InitResult.Capabilities
 
+	require.NotNil(t, caps.PositionEncoding)
+	assert.Equal(t, lsp.PositionEncodingUTF16, *caps.PositionEncoding)
 	require.NotNil(t, caps.TextDocumentSync)
 	assert.Equal(t, lsp.SyncFull, caps.TextDocumentSync.Change)
 	require.NotNil(t, caps.HoverProvider)
 	assert.True(t, *caps.HoverProvider)
 	require.NotNil(t, caps.DocumentSymbolProvider)
 	assert.True(t, *caps.DocumentSymbolProvider)
+}
+
+func TestPickPositionEncoding(t *testing.T) {
+	t.Run("defaults to utf-16 when no capabilities", func(t *testing.T) {
+		assert.Equal(t, lsp.PositionEncodingUTF16, pickPositionEncoding(nil))
+	})
+
+	t.Run("picks utf-8 when supported by client", func(t *testing.T) {
+		caps := &lsp.ClientCapabilities{
+			General: &lsp.GeneralClientCapabilities{
+				PositionEncodings: []lsp.PositionEncodingKind{lsp.PositionEncodingUTF16, lsp.PositionEncodingUTF8},
+			},
+		}
+		assert.Equal(t, lsp.PositionEncodingUTF8, pickPositionEncoding(caps))
+	})
+
+	t.Run("falls back to utf-16 when utf-8 is not supported", func(t *testing.T) {
+		caps := &lsp.ClientCapabilities{
+			General: &lsp.GeneralClientCapabilities{
+				PositionEncodings: []lsp.PositionEncodingKind{lsp.PositionEncodingUTF16},
+			},
+		}
+		assert.Equal(t, lsp.PositionEncodingUTF16, pickPositionEncoding(caps))
+	})
+
+	t.Run("uses offered encoding when utf-16 and utf-8 are not present", func(t *testing.T) {
+		caps := &lsp.ClientCapabilities{
+			General: &lsp.GeneralClientCapabilities{
+				PositionEncodings: []lsp.PositionEncodingKind{lsp.PositionEncodingUTF32},
+			},
+		}
+		assert.Equal(t, lsp.PositionEncodingUTF32, pickPositionEncoding(caps))
+	})
 }
 
 func TestDidOpenAndSymbols(t *testing.T) {

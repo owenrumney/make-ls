@@ -33,10 +33,37 @@ func New() *Handler {
 
 func boolPtr(b bool) *bool { return &b }
 
+func pickPositionEncoding(client *lsp.ClientCapabilities) lsp.PositionEncodingKind {
+	if client != nil && client.General != nil {
+		var hasUTF16 bool
+		for _, enc := range client.General.PositionEncodings {
+			if enc == lsp.PositionEncodingUTF8 {
+				return lsp.PositionEncodingUTF8
+			}
+			if enc == lsp.PositionEncodingUTF16 {
+				hasUTF16 = true
+			}
+		}
+		if hasUTF16 {
+			return lsp.PositionEncodingUTF16
+		}
+		if len(client.General.PositionEncodings) > 0 {
+			return client.General.PositionEncodings[0]
+		}
+	}
+	return lsp.PositionEncodingUTF16
+}
+
 // Initialize handles the initialize request.
-func (h *Handler) Initialize(_ context.Context, _ *lsp.InitializeParams) (*lsp.InitializeResult, error) {
+func (h *Handler) Initialize(_ context.Context, params *lsp.InitializeParams) (*lsp.InitializeResult, error) {
+	var clientCaps *lsp.ClientCapabilities
+	if params != nil {
+		clientCaps = &params.Capabilities
+	}
+	positionEncoding := pickPositionEncoding(clientCaps)
 	return &lsp.InitializeResult{
 		Capabilities: lsp.ServerCapabilities{
+			PositionEncoding: &positionEncoding,
 			TextDocumentSync: &lsp.TextDocumentSyncOptions{
 				OpenClose: boolPtr(true),
 				Change:    lsp.SyncFull,

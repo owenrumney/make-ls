@@ -12,15 +12,17 @@ import (
 	"github.com/owenrumney/make-ls/internal/completion"
 	"github.com/owenrumney/make-ls/internal/model"
 	"github.com/owenrumney/make-ls/internal/parser"
+	"github.com/owenrumney/make-ls/internal/position"
 	"github.com/owenrumney/make-ls/internal/resolver"
 )
 
 // Handler implements the LSP handler interfaces for Makefiles.
 type Handler struct {
-	client *server.Client
-	mu     sync.Mutex
-	docs   map[lsp.DocumentURI]string
-	parsed map[lsp.DocumentURI]*model.Makefile
+	client   *server.Client
+	mu       sync.Mutex
+	docs     map[lsp.DocumentURI]string
+	parsed   map[lsp.DocumentURI]*model.Makefile
+	encoding lsp.PositionEncodingKind
 }
 
 // New creates a new Handler.
@@ -61,6 +63,9 @@ func (h *Handler) Initialize(_ context.Context, params *lsp.InitializeParams) (*
 		clientCaps = &params.Capabilities
 	}
 	positionEncoding := pickPositionEncoding(clientCaps)
+	h.mu.Lock()
+	h.encoding = positionEncoding
+	h.mu.Unlock()
 	return &lsp.InitializeResult{
 		Capabilities: lsp.ServerCapabilities{
 			PositionEncoding: &positionEncoding,
@@ -96,6 +101,12 @@ func (h *Handler) Shutdown(_ context.Context) error {
 // SetClient stores the client for sending notifications.
 func (h *Handler) SetClient(client *server.Client) {
 	h.client = client
+}
+
+// encoderFor returns a position encoder for the given document text using
+// the negotiated wire encoding. Callers should fetch text under h.mu.
+func (h *Handler) encoderFor(text string) *position.Encoder {
+	return position.New(text, h.encoding)
 }
 
 // DidOpen handles textDocument/didOpen.
@@ -140,6 +151,7 @@ func (h *Handler) DidSave(ctx context.Context, params *lsp.DidSaveTextDocumentPa
 	h.mu.Lock()
 	uri := params.TextDocument.URI
 	mf := h.parsed[uri]
+	text := h.docs[uri]
 	h.mu.Unlock()
 
 	if mf == nil || h.client == nil {
@@ -149,6 +161,10 @@ func (h *Handler) DidSave(ctx context.Context, params *lsp.DidSaveTextDocumentPa
 	diags := analysis.Diagnose(mf)
 	if diags == nil {
 		diags = []lsp.Diagnostic{}
+	}
+	enc := h.encoderFor(text)
+	for i := range diags {
+		diags[i].Range = enc.RangeToWire(diags[i].Range)
 	}
 	return h.client.PublishDiagnostics(ctx, &lsp.PublishDiagnosticsParams{
 		URI:         uri,
@@ -167,7 +183,8 @@ func (h *Handler) Hover(_ context.Context, params *lsp.HoverParams) (*lsp.Hover,
 		return nil, nil
 	}
 
-	pos := params.Position
+	enc := h.encoderFor(text)
+	pos := enc.FromWire(params.Position)
 
 	// Check targets.
 	for _, t := range mf.Targets {
@@ -259,12 +276,14 @@ func (h *Handler) Hover(_ context.Context, params *lsp.HoverParams) (*lsp.Hover,
 func (h *Handler) DocumentSymbol(_ context.Context, params *lsp.DocumentSymbolParams) ([]lsp.DocumentSymbol, error) {
 	h.mu.Lock()
 	mf := h.parsed[params.TextDocument.URI]
+	text := h.docs[params.TextDocument.URI]
 	h.mu.Unlock()
 
 	if mf == nil {
 		return nil, nil
 	}
 
+	enc := h.encoderFor(text)
 	var symbols []lsp.DocumentSymbol
 
 	for _, t := range mf.Targets {
@@ -278,8 +297,8 @@ func (h *Handler) DocumentSymbol(_ context.Context, params *lsp.DocumentSymbolPa
 			Name:           t.Name,
 			Detail:         detail,
 			Kind:           lsp.SymbolKindFunction,
-			Range:          t.Range,
-			SelectionRange: t.NameRange,
+			Range:          enc.RangeToWire(t.Range),
+			SelectionRange: enc.RangeToWire(t.NameRange),
 		})
 	}
 
@@ -292,18 +311,19 @@ func (h *Handler) DocumentSymbol(_ context.Context, params *lsp.DocumentSymbolPa
 			Name:           v.Name,
 			Detail:         detail,
 			Kind:           lsp.SymbolKindVariable,
-			Range:          v.Range,
-			SelectionRange: v.NameRange,
+			Range:          enc.RangeToWire(v.Range),
+			SelectionRange: enc.RangeToWire(v.NameRange),
 		})
 	}
 
 	for _, c := range mf.Conditionals {
 		name := conditionalName(c)
+		wire := enc.RangeToWire(c.Range)
 		symbols = append(symbols, lsp.DocumentSymbol{
 			Name:           name,
 			Kind:           lsp.SymbolKindNamespace,
-			Range:          c.Range,
-			SelectionRange: c.Range,
+			Range:          wire,
+			SelectionRange: wire,
 		})
 	}
 
@@ -462,7 +482,8 @@ func (h *Handler) Completion(_ context.Context, params *lsp.CompletionParams) (*
 		return nil, nil
 	}
 
-	items := completion.Complete(mf, text, params.Position)
+	enc := h.encoderFor(text)
+	items := completion.Complete(mf, text, enc.FromWire(params.Position))
 	return &lsp.CompletionList{
 		IsIncomplete: false,
 		Items:        items,
@@ -481,7 +502,8 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 		return nil, nil
 	}
 
-	pos := params.Position
+	enc := h.encoderFor(text)
+	pos := enc.FromWire(params.Position)
 
 	// Cursor on a dependency name → jump to target definition.
 	for _, t := range mf.Targets {
@@ -490,7 +512,7 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 				if target := findTarget(mf, dep.Name); target != nil {
 					return []lsp.Location{{
 						URI:   uri,
-						Range: target.NameRange,
+						Range: enc.RangeToWire(target.NameRange),
 					}}, nil
 				}
 			}
@@ -503,7 +525,7 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 			if v.Name == varName {
 				return []lsp.Location{{
 					URI:   uri,
-					Range: v.NameRange,
+					Range: enc.RangeToWire(v.NameRange),
 				}}, nil
 			}
 		}
@@ -511,7 +533,7 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 			if d.Name == varName {
 				return []lsp.Location{{
 					URI:   uri,
-					Range: d.Range,
+					Range: enc.RangeToWire(d.Range),
 				}}, nil
 			}
 		}
@@ -535,38 +557,40 @@ func (h *Handler) References(_ context.Context, params *lsp.ReferenceParams) ([]
 	h.mu.Lock()
 	uri := params.TextDocument.URI
 	mf := h.parsed[uri]
+	text := h.docs[uri]
 	h.mu.Unlock()
 
 	if mf == nil {
 		return nil, nil
 	}
 
-	pos := params.Position
+	enc := h.encoderFor(text)
+	pos := enc.FromWire(params.Position)
 
 	// Cursor on a target name → find all deps referencing it.
 	for _, t := range mf.Targets {
 		if inRange(pos, t.NameRange) {
-			return findTargetReferences(mf, uri, t.Name, params.Context.IncludeDeclaration), nil
+			return findTargetReferences(mf, uri, t.Name, params.Context.IncludeDeclaration, enc), nil
 		}
 	}
 
 	// Cursor on a variable name → find all $(VAR) refs.
 	for _, v := range mf.Variables {
 		if inRange(pos, v.NameRange) {
-			return findVarReferences(mf, uri, v.Name, params.Context.IncludeDeclaration), nil
+			return findVarReferences(mf, uri, v.Name, params.Context.IncludeDeclaration, enc), nil
 		}
 	}
 
 	return nil, nil
 }
 
-func findTargetReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, includeDecl bool) []lsp.Location {
+func findTargetReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, includeDecl bool, enc *position.Encoder) []lsp.Location {
 	var locs []lsp.Location
 
 	if includeDecl {
 		for _, t := range mf.Targets {
 			if t.Name == name {
-				locs = append(locs, lsp.Location{URI: uri, Range: t.NameRange})
+				locs = append(locs, lsp.Location{URI: uri, Range: enc.RangeToWire(t.NameRange)})
 			}
 		}
 	}
@@ -574,7 +598,7 @@ func findTargetReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, 
 	for _, t := range mf.Targets {
 		for _, dep := range append(t.Deps, t.OrderOnlyDeps...) {
 			if dep.Name == name {
-				locs = append(locs, lsp.Location{URI: uri, Range: dep.Range})
+				locs = append(locs, lsp.Location{URI: uri, Range: enc.RangeToWire(dep.Range)})
 			}
 		}
 	}
@@ -582,13 +606,13 @@ func findTargetReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, 
 	return locs
 }
 
-func findVarReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, includeDecl bool) []lsp.Location {
+func findVarReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, includeDecl bool, enc *position.Encoder) []lsp.Location {
 	var locs []lsp.Location
 
 	if includeDecl {
 		for _, v := range mf.Variables {
 			if v.Name == name {
-				locs = append(locs, lsp.Location{URI: uri, Range: v.NameRange})
+				locs = append(locs, lsp.Location{URI: uri, Range: enc.RangeToWire(v.NameRange)})
 			}
 		}
 	}
@@ -596,7 +620,7 @@ func findVarReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, inc
 	for _, v := range mf.Variables {
 		for _, ref := range v.Refs {
 			if ref.Name == name {
-				locs = append(locs, lsp.Location{URI: uri, Range: ref.Range})
+				locs = append(locs, lsp.Location{URI: uri, Range: enc.RangeToWire(ref.Range)})
 			}
 		}
 	}
@@ -695,12 +719,13 @@ func (h *Handler) Formatting(_ context.Context, params *lsp.DocumentFormattingPa
 	lastLine := len(lines) - 1
 	lastChar := len(lines[lastLine])
 
+	enc := h.encoderFor(text)
 	return []lsp.TextEdit{
 		{
-			Range: lsp.Range{
+			Range: enc.RangeToWire(lsp.Range{
 				Start: lsp.Position{Line: 0, Character: 0},
 				End:   lsp.Position{Line: lastLine, Character: lastChar},
-			},
+			}),
 			NewText: formatted,
 		},
 	}, nil

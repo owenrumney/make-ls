@@ -61,6 +61,7 @@ func Parse(uri lsp.DocumentURI, text string) *model.Makefile {
 		Directives:   p.directives,
 		Defines:      p.defines,
 		Phonies:      p.phonies,
+		PhonyRefs:    p.phonyRefs,
 		Comments:     p.comments,
 	}
 }
@@ -77,6 +78,7 @@ type parser struct {
 	directives   []*model.Directive
 	defines      []*model.Define
 	phonies      map[string]bool
+	phonyRefs    []*model.DepRef
 	comments     []*model.Comment
 
 	// Currently active target for recipe collection.
@@ -144,8 +146,18 @@ func (p *parser) parseLine() {
 
 	// .PHONY
 	if m := phonyRe.FindStringSubmatch(trimmed); m != nil {
-		for _, name := range splitFields(m[1]) {
-			p.phonies[name] = true
+		colonIdx := strings.Index(line, ":")
+		if colonIdx < 0 {
+			colonIdx = strings.Index(trimmed, ":")
+		}
+		depsPart := m[1]
+		if colonIdx >= 0 && colonIdx+1 <= len(line) {
+			depsPart = line[colonIdx+1:]
+		}
+		refs := parseDeps(depsPart, startLine, colonIdx+1)
+		for _, ref := range refs {
+			p.phonies[ref.Name] = true
+			p.phonyRefs = append(p.phonyRefs, ref)
 		}
 		p.commentBlock = nil
 		p.pos++
@@ -385,9 +397,9 @@ func (p *parser) parseDefine(m []string, startLine int) {
 	p.pos++ // skip endef
 
 	p.defines = append(p.defines, &model.Define{
-		Name:  name,
-		Op:    op,
-		Body:  strings.Join(body, "\n"),
+		Name: name,
+		Op:   op,
+		Body: strings.Join(body, "\n"),
 		Range: lsp.Range{
 			Start: lsp.Position{Line: startLine, Character: 0},
 			End:   lsp.Position{Line: endLine, Character: len("endef")},

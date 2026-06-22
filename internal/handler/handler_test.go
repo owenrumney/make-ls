@@ -272,8 +272,8 @@ endif
 	for _, s := range symbols {
 		kinds[s.Kind]++
 	}
-	assert.Equal(t, 1, kinds[lsp.SymbolKindNamespace])  // conditional
-	assert.Equal(t, 1, kinds[lsp.SymbolKindVariable])    // CC
+	assert.Equal(t, 1, kinds[lsp.SymbolKindNamespace]) // conditional
+	assert.Equal(t, 1, kinds[lsp.SymbolKindVariable])  // CC
 }
 
 func TestSymbolsPatternRuleDetail(t *testing.T) {
@@ -356,6 +356,20 @@ func TestDefinitionFromDepToTarget(t *testing.T) {
 	assert.Equal(t, 2, locs[0].Range.Start.Line) // build target is on line 2
 }
 
+func TestDefinitionFromPhonyToTarget(t *testing.T) {
+	harness := newHarness(t)
+
+	input := ".PHONY: all clean\n\nall:\n\techo all\n\nclean:\n\trm -rf build\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	// Cursor on "clean" in the .PHONY declaration.
+	locs, err := harness.Definition(testURI, 0, len(".PHONY: all "))
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 5, locs[0].Range.Start.Line)
+	assert.Equal(t, 0, locs[0].Range.Start.Character)
+}
+
 func TestDefinitionFromVarRef(t *testing.T) {
 	harness := newHarness(t)
 
@@ -408,6 +422,17 @@ func TestReferencesForTargetExcludeDecl(t *testing.T) {
 	locs, err := harness.References(testURI, 2, 0, false)
 	require.NoError(t, err)
 	require.Len(t, locs, 1) // only the reference in "all: build"
+}
+
+func TestReferencesForTargetIncludesPhony(t *testing.T) {
+	harness := newHarness(t)
+
+	input := ".PHONY: build\nall: build\n\nbuild:\n\tgo build\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 3, 0, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 3) // declaration + dependency + .PHONY reference
 }
 
 func TestReferencesForVariable(t *testing.T) {

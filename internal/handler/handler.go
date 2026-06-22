@@ -79,8 +79,8 @@ func (h *Handler) Initialize(_ context.Context, params *lsp.InitializeParams) (*
 			CompletionProvider: &lsp.CompletionOptions{
 				TriggerCharacters: []string{"$", "("},
 			},
-			DefinitionProvider:   boolPtr(true),
-			ReferencesProvider:   boolPtr(true),
+			DefinitionProvider: boolPtr(true),
+			ReferencesProvider: boolPtr(true),
 			CodeActionProvider: &lsp.CodeActionOptions{
 				CodeActionKinds: []lsp.CodeActionKind{lsp.CodeActionQuickFix},
 			},
@@ -197,6 +197,15 @@ func (h *Handler) Hover(_ context.Context, params *lsp.HoverParams) (*lsp.Hover,
 				if target := findTarget(mf, dep.Name); target != nil {
 					return targetHover(target), nil
 				}
+			}
+		}
+	}
+
+	// Check .PHONY target references.
+	for _, phony := range mf.PhonyRefs {
+		if inRange(pos, phony.Range) {
+			if target := findTarget(mf, phony.Name); target != nil {
+				return targetHover(target), nil
 			}
 		}
 	}
@@ -519,6 +528,18 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 		}
 	}
 
+	// Cursor on a .PHONY target name → jump to target definition.
+	for _, phony := range mf.PhonyRefs {
+		if inRange(pos, phony.Range) {
+			if target := findTarget(mf, phony.Name); target != nil {
+				return []lsp.Location{{
+					URI:   uri,
+					Range: enc.RangeToWire(target.NameRange),
+				}}, nil
+			}
+		}
+	}
+
 	// Cursor on a variable reference → jump to variable definition.
 	if varName := varRefAtPosition(text, pos); varName != "" {
 		for _, v := range mf.Variables {
@@ -600,6 +621,12 @@ func findTargetReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, 
 			if dep.Name == name {
 				locs = append(locs, lsp.Location{URI: uri, Range: enc.RangeToWire(dep.Range)})
 			}
+		}
+	}
+
+	for _, phony := range mf.PhonyRefs {
+		if phony.Name == name {
+			locs = append(locs, lsp.Location{URI: uri, Range: enc.RangeToWire(phony.Range)})
 		}
 	}
 

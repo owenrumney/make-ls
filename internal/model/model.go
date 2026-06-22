@@ -12,6 +12,7 @@ type Makefile struct {
 	Directives   []*Directive
 	Defines      []*Define
 	Phonies      map[string]bool
+	PhonyRefs    []*DepRef
 	Comments     []*Comment
 }
 
@@ -26,7 +27,7 @@ type Target struct {
 	NameRange     lsp.Range
 
 	// Pattern rule fields
-	IsPattern    bool
+	IsPattern     bool
 	IsDoubleColon bool
 
 	// Static pattern rule fields (e.g. $(OBJ): %.o: %.c)
@@ -39,11 +40,11 @@ type Target struct {
 
 // Variable represents a variable assignment.
 type Variable struct {
-	Name     string
-	Value    string
-	Op       VarOp
-	Flavour  VarFlavour
-	Range    lsp.Range
+	Name      string
+	Value     string
+	Op        VarOp
+	Flavour   VarFlavour
+	Range     lsp.Range
 	NameRange lsp.Range
 
 	// Non-empty when this is a target-specific variable.
@@ -63,11 +64,11 @@ type Variable struct {
 type VarOp string
 
 const (
-	OpRecursive VarOp = "="
-	OpSimple    VarOp = ":="
+	OpRecursive   VarOp = "="
+	OpSimple      VarOp = ":="
 	OpConditional VarOp = "?="
-	OpAppend    VarOp = "+="
-	OpShell     VarOp = "!="
+	OpAppend      VarOp = "+="
+	OpShell       VarOp = "!="
 )
 
 // VarFlavour distinguishes recursive from simply-expanded variables.
@@ -99,11 +100,11 @@ type Include struct {
 
 // Conditional represents an ifeq/ifneq/ifdef/ifndef block.
 type Conditional struct {
-	Type       ConditionalType
-	Args       string
-	Range      lsp.Range
-	ThenNodes  []Node
-	ElseNodes  []Node
+	Type      ConditionalType
+	Args      string
+	Range     lsp.Range
+	ThenNodes []Node
+	ElseNodes []Node
 }
 
 // ConditionalType identifies the conditional directive.

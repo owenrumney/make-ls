@@ -101,6 +101,11 @@ func TestParsePhony(t *testing.T) {
 	assert.True(t, m.Phonies["clean"])
 	assert.True(t, m.Phonies["test"])
 	assert.False(t, m.Phonies["build"])
+
+	require.Len(t, m.PhonyRefs, 3)
+	assert.Equal(t, "all", m.PhonyRefs[0].Name)
+	assert.Equal(t, 8, m.PhonyRefs[0].Range.Start.Character)
+	assert.Equal(t, 11, m.PhonyRefs[0].Range.End.Character)
 }
 
 func TestParseInclude(t *testing.T) {
@@ -493,7 +498,7 @@ include config.mk
 	assert.True(t, m.Phonies["test"])
 
 	assert.Len(t, m.Variables, 3) // CC, CFLAGS, CFLAGS (in conditional)
-	assert.Len(t, m.Targets, 3)  // all, %.o, clean
+	assert.Len(t, m.Targets, 3)   // all, %.o, clean
 	assert.Len(t, m.Includes, 1)
 	assert.Len(t, m.Conditionals, 1)
 

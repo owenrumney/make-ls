@@ -1,3 +1,5 @@
+default: build
+
 .PHONY: build test clean extension extension-target extension-install
 
 GO_MODULE := github.com/owenrumney/make-ls

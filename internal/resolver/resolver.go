@@ -79,6 +79,7 @@ func merge(parent, child *model.Makefile) {
 	parent.Directives = append(parent.Directives, child.Directives...)
 	parent.Conditionals = append(parent.Conditionals, child.Conditionals...)
 	parent.Comments = append(parent.Comments, child.Comments...)
+	parent.PhonyRefs = append(parent.PhonyRefs, child.PhonyRefs...)
 	for k, v := range child.Phonies {
 		if v {
 			parent.Phonies[k] = true

@@ -253,6 +253,40 @@ func TestParseUnexportDirective(t *testing.T) {
 	assert.Equal(t, model.DirUnexport, m.Directives[0].Type)
 }
 
+func TestParseExportDirectiveVarRefPositions(t *testing.T) {
+	// "export LC_COLLATE LC_NUMERIC" — variable names must have tracked positions.
+	input := "export LC_COLLATE LC_NUMERIC"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Directives, 1)
+	d := m.Directives[0]
+	assert.Equal(t, model.DirExport, d.Type)
+	require.Len(t, d.VarRefs, 2)
+
+	// LC_COLLATE starts at column 7 ("export " is 7 chars)
+	assert.Equal(t, "LC_COLLATE", d.VarRefs[0].Name)
+	assert.Equal(t, 0, d.VarRefs[0].Range.Start.Line)
+	assert.Equal(t, 7, d.VarRefs[0].Range.Start.Character)
+	assert.Equal(t, 17, d.VarRefs[0].Range.End.Character)
+
+	// LC_NUMERIC starts at column 18
+	assert.Equal(t, "LC_NUMERIC", d.VarRefs[1].Name)
+	assert.Equal(t, 18, d.VarRefs[1].Range.Start.Character)
+	assert.Equal(t, 28, d.VarRefs[1].Range.End.Character)
+}
+
+func TestParseExportDirectiveSingleVarRefPosition(t *testing.T) {
+	input := "export FOO"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Directives, 1)
+	d := m.Directives[0]
+	require.Len(t, d.VarRefs, 1)
+	assert.Equal(t, "FOO", d.VarRefs[0].Name)
+	assert.Equal(t, 7, d.VarRefs[0].Range.Start.Character)
+	assert.Equal(t, 10, d.VarRefs[0].Range.End.Character)
+}
+
 func TestParseOverrideVar(t *testing.T) {
 	input := `override CC = gcc`
 	m := Parse(testURI, input)

@@ -129,9 +129,10 @@ type Node struct {
 
 // Directive represents export, unexport, vpath, or override directives.
 type Directive struct {
-	Type  DirectiveType
-	Args  string
-	Range lsp.Range
+	Type    DirectiveType
+	Args    string
+	Range   lsp.Range
+	VarRefs []*VarRef // for export/unexport: positions of each referenced variable name
 }
 
 // DirectiveType identifies the directive.

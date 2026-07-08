@@ -396,6 +396,43 @@ func TestDefinitionNoResult(t *testing.T) {
 	assert.Nil(t, locs)
 }
 
+func TestDefinitionFromExportVarName(t *testing.T) {
+	harness := newHarness(t)
+
+	// line 0: "LC_COLLATE=C"
+	// line 1: "LC_NUMERIC=C"
+	// line 2: "export LC_COLLATE LC_NUMERIC"
+	input := "LC_COLLATE=C\nLC_NUMERIC=C\nexport LC_COLLATE LC_NUMERIC\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	// Cursor on "LC_COLLATE" in "export LC_COLLATE LC_NUMERIC" — col 7 is the 'L'
+	locs, err := harness.Definition(testURI, 2, 7)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 0, locs[0].Range.Start.Line) // LC_COLLATE defined on line 0
+
+	// Cursor on "LC_NUMERIC" — col 18
+	locs, err = harness.Definition(testURI, 2, 18)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 1, locs[0].Range.Start.Line) // LC_NUMERIC defined on line 1
+}
+
+func TestDefinitionFromUnexportVarName(t *testing.T) {
+	harness := newHarness(t)
+
+	// line 0: "FOO = bar"
+	// line 1: "unexport FOO"
+	input := "FOO = bar\nunexport FOO\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	// Cursor on "FOO" in "unexport FOO" — col 9 is the 'F'
+	locs, err := harness.Definition(testURI, 1, 9)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 0, locs[0].Range.Start.Line) // FOO defined on line 0
+}
+
 func TestReferencesForTarget(t *testing.T) {
 	harness := newHarness(t)
 

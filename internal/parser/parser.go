@@ -208,10 +208,18 @@ func (p *parser) parseLine() {
 		if m[1] == "unexport" {
 			dirType = model.DirUnexport
 		}
+		argsStr := strings.TrimSpace(m[2])
+		argsOffset := 0
+		if argsStr != "" {
+			if idx := strings.Index(line, argsStr); idx >= 0 {
+				argsOffset = idx
+			}
+		}
 		p.directives = append(p.directives, &model.Directive{
-			Type:  dirType,
-			Args:  strings.TrimSpace(m[2]),
-			Range: lineRange(startLine, 0, len(line)),
+			Type:    dirType,
+			Args:    argsStr,
+			Range:   lineRange(startLine, 0, len(line)),
+			VarRefs: parseVarNames(argsStr, startLine, argsOffset),
 		})
 		p.commentBlock = nil
 		p.pos++
@@ -543,6 +551,32 @@ func parseDeps(s string, line, colOffset int) []*model.DepRef {
 		}
 	}
 	return deps
+}
+
+// parseVarNames parses a space-separated list of variable names and returns
+// VarRef entries with their positions in the source line.
+// It uses the same offset-advancing approach as parseDeps: because
+// strings.Fields returns tokens in left-to-right order and we advance offset
+// past each matched token, a name that is a prefix of another (e.g. "FOO" vs
+// "FOOBAR") is always found at its correct position.
+func parseVarNames(s string, line, colOffset int) []*model.VarRef {
+	var refs []*model.VarRef
+	offset := 0
+	for _, name := range splitFields(s) {
+		idx := strings.Index(s[offset:], name)
+		if idx >= 0 {
+			col := colOffset + offset + idx
+			refs = append(refs, &model.VarRef{
+				Name: name,
+				Range: lsp.Range{
+					Start: lsp.Position{Line: line, Character: col},
+					End:   lsp.Position{Line: line, Character: col + len(name)},
+				},
+			})
+			offset = offset + idx + len(name)
+		}
+	}
+	return refs
 }
 
 func extractVarRefs(s string, line int) []*model.VarRef {

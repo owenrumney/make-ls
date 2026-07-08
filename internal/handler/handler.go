@@ -560,6 +560,30 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 		}
 	}
 
+	// Cursor on a variable name in export/unexport directive → jump to variable definition.
+	for _, dir := range mf.Directives {
+		for _, ref := range dir.VarRefs {
+			if inRange(pos, ref.Range) {
+				for _, v := range mf.Variables {
+					if v.Name == ref.Name {
+						return []lsp.Location{{
+							URI:   uri,
+							Range: enc.RangeToWire(v.NameRange),
+						}}, nil
+					}
+				}
+				for _, d := range mf.Defines {
+					if d.Name == ref.Name {
+						return []lsp.Location{{
+							URI:   uri,
+							Range: enc.RangeToWire(d.Range),
+						}}, nil
+					}
+				}
+			}
+		}
+	}
+
 	// Cursor on an include path → jump to file.
 	for _, inc := range mf.Includes {
 		if inRange(pos, inc.Range) {

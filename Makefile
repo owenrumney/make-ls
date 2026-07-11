@@ -32,4 +32,4 @@ extension-install: build
 	mkdir -p $(EXT_DIR)/bin
 	cp bin/$(BINARY) $(EXT_DIR)/bin/$(BINARY)
 	cd $(EXT_DIR) && npx vsce package
-	code --install-extension $(EXT_DIR)/*.vsix
+	code --install-extension $(EXT_DIR)/*.vsix --force

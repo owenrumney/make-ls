@@ -43,32 +43,54 @@ type resolver struct {
 
 func (r *resolver) resolve(mf *model.Makefile, baseDir string) {
 	for _, inc := range mf.Includes {
-		incPath := inc.Path
-
-		// Resolve relative to the including Makefile's directory.
-		if !filepath.IsAbs(incPath) {
-			incPath = filepath.Join(baseDir, incPath)
-		}
-		incPath = filepath.Clean(incPath)
-
-		incURI := uriFromPath(incPath)
-		if r.seen[string(incURI)] {
-			continue // circular include
-		}
-		r.seen[string(incURI)] = true
-
-		data, err := os.ReadFile(incPath)
-		if err != nil {
-			if inc.Optional {
-				continue // -include / sinclude: silently skip
+		paths := resolveIncludePaths(mf, baseDir, inc)
+		for _, incPath := range paths {
+			if inc.ResolvedPath == "" {
+				inc.ResolvedPath = incPath
 			}
-			continue // non-optional but missing: skip (diagnostics will catch this)
-		}
+			incURI := uriFromPath(incPath)
+			if r.seen[string(incURI)] {
+				continue // circular include
+			}
+			r.seen[string(incURI)] = true
 
-		child := parser.Parse(incURI, string(data))
-		r.resolve(child, filepath.Dir(incPath))
-		merge(mf, child)
+			// #nosec G304 -- include paths are resolved from parsed Makefile content by design.
+			data, err := os.ReadFile(incPath)
+			if err != nil {
+				if inc.Optional {
+					continue // -include / sinclude: silently skip
+				}
+				continue // non-optional but missing: skip (diagnostics will catch this)
+			}
+
+			child := parser.Parse(incURI, string(data))
+			r.resolve(child, filepath.Dir(incPath))
+			merge(mf, child)
+		}
 	}
+}
+
+func resolveIncludePaths(mf *model.Makefile, baseDir string, inc *model.Include) []string {
+	ctx := newEvalContext(baseDir, mf, int(inc.Range.Start.Line))
+	expanded := ctx.expandText(inc.Path)
+	if expanded == "" {
+		expanded = inc.Path
+	}
+	fields := strings.Fields(expanded)
+	if len(fields) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(fields))
+	for _, p := range fields {
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(baseDir, p)
+		}
+		paths = append(paths, filepath.Clean(p))
+	}
+	return paths
 }
 
 // merge folds the child Makefile's contents into the parent.

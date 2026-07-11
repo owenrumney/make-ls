@@ -383,6 +383,9 @@ endif
 
 	require.Len(t, m.Conditionals, 1)
 	assert.Equal(t, model.CondIfdef, m.Conditionals[0].Type)
+	require.Len(t, m.Conditionals[0].VarRefs, 1)
+	assert.Equal(t, "DEBUG", m.Conditionals[0].VarRefs[0].Name)
+	assert.Equal(t, 6, m.Conditionals[0].VarRefs[0].Range.Start.Character)
 	require.Len(t, m.Variables, 1)
 }
 
@@ -397,10 +400,37 @@ endif
 
 	require.Len(t, m.Conditionals, 1)
 	outer := m.Conditionals[0]
+	require.Len(t, outer.VarRefs, 1)
+	assert.Equal(t, "OS", outer.VarRefs[0].Name)
 	require.Len(t, outer.ThenNodes, 1)
 	assert.NotNil(t, outer.ThenNodes[0].Conditional)
 	nested := outer.ThenNodes[0].Conditional
 	assert.Equal(t, model.CondIfdef, nested.Type)
+}
+
+func TestParseElseIfConditional(t *testing.T) {
+	input := `ifdef OUTER
+FOO := 1
+else ifeq ($(MODE),debug)
+BAR := 2
+else
+BAR := 3
+endif
+`
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Conditionals, 1)
+	outer := m.Conditionals[0]
+	require.Len(t, outer.ElseNodes, 1)
+	require.NotNil(t, outer.ElseNodes[0].Conditional)
+	nested := outer.ElseNodes[0].Conditional
+	assert.Equal(t, model.CondIfeq, nested.Type)
+	require.Len(t, nested.VarRefs, 1)
+	assert.Equal(t, "MODE", nested.VarRefs[0].Name)
+	require.Len(t, nested.ThenNodes, 1)
+	require.Len(t, nested.ElseNodes, 1)
+	assert.Equal(t, "BAR", nested.ThenNodes[0].Variable.Name)
+	assert.Equal(t, "BAR", nested.ElseNodes[0].Variable.Name)
 }
 
 func TestParseLineContinuation(t *testing.T) {
@@ -498,6 +528,14 @@ endif
 
 	// Also collected at top level.
 	require.Len(t, m.Includes, 1)
+}
+
+func TestParseComputedInclude(t *testing.T) {
+	input := `include $(addprefix $(srctree)/, $(include-y))`
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Includes, 1)
+	assert.Equal(t, "$(addprefix $(srctree)/, $(include-y))", m.Includes[0].Path)
 }
 
 func TestParseTargetSpecificVarAttachesToTarget(t *testing.T) {

@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -446,6 +448,205 @@ func TestDefinitionFromExportVarNameToOverrideVar(t *testing.T) {
 	assert.Equal(t, 0, locs[0].Range.Start.Line)
 	assert.Equal(t, 9, locs[0].Range.Start.Character)
 	assert.Equal(t, 23, locs[0].Range.End.Character)
+}
+
+func TestDefinitionFromExportVarNameInKernelSnippet(t *testing.T) {
+	harness := newHarness(t)
+
+	input := `# Use make M=dir or set the environment variable KBUILD_EXTMOD to specify the
+# directory of external module to build. Setting M= takes precedence.
+ifeq ("$(origin M)", "command line")
+  KBUILD_EXTMOD := $(M)
+endif
+
+ifeq ("$(origin MO)", "command line")
+  KBUILD_EXTMOD_OUTPUT := $(MO)
+endif
+
+$(if $(word 2, $(KBUILD_EXTMOD)), \
+    $(error building multiple external modules is not supported))
+
+$(foreach x, % :, $(if $(findstring $x, $(KBUILD_EXTMOD)), \
+    $(error module directory path cannot contain '$x')))
+
+# Remove trailing slashes
+ifneq ($(filter %/, $(KBUILD_EXTMOD)),)
+KBUILD_EXTMOD := $(shell dirname $(KBUILD_EXTMOD).)
+endif
+
+export KBUILD_EXTMOD
+`
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.Definition(testURI, 21, 7)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 3, locs[0].Range.Start.Line)
+	assert.Equal(t, 2, locs[0].Range.Start.Character)
+	assert.Equal(t, 15, locs[0].Range.End.Character)
+}
+
+func TestDefinitionFromIfdefVarName(t *testing.T) {
+	harness := newHarness(t)
+
+	input := `KBUILD_EXTMOD := foo
+ifdef KBUILD_EXTMOD
+	objtree := $(realpath $(KBUILD_EXTMOD))
+endif
+`
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.Definition(testURI, 1, 6)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 0, locs[0].Range.Start.Line)
+	assert.Equal(t, 0, locs[0].Range.Start.Character)
+	assert.Equal(t, 13, locs[0].Range.End.Character)
+}
+
+func TestDefinitionFromNestedIndentedIfdefVarName(t *testing.T) {
+	harness := newHarness(t)
+
+	input := `ifeq ("$(origin O)", "command line")
+  KBUILD_OUTPUT := $(O)
+else
+    ifdef KBUILD_OUTPUT
+        objtree := $(realpath $(KBUILD_OUTPUT))
+        $(if $(objtree),,$(error specified kernel directory "$(KBUILD_OUTPUT)" does not exist))
+    else
+        objtree := $(abs_srctree)
+    endif
+endif
+`
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.Definition(testURI, 3, 10)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 1, locs[0].Range.Start.Line)
+	assert.Equal(t, 2, locs[0].Range.Start.Character)
+	assert.Equal(t, 15, locs[0].Range.End.Character)
+}
+
+func TestDefinitionFromExportVarsInKernelSnippet(t *testing.T) {
+	harness := newHarness(t)
+
+	input := `ifeq ("$(origin V)", "command line")
+  KBUILD_VERBOSE = $(V)
+endif
+
+quiet = quiet_
+Q = @
+
+ifneq ($(findstring 1, $(KBUILD_VERBOSE)),)
+  quiet =
+  Q =
+endif
+
+# If the user is running make -s (silent mode), suppress echoing of
+# commands
+ifneq ($(findstring s,$(firstword -$(MAKEFLAGS))),)
+quiet=silent_
+override KBUILD_VERBOSE :=
+endif
+
+export quiet Q KBUILD_VERBOSE
+`
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	t.Run("quiet", func(t *testing.T) {
+		locs, err := harness.Definition(testURI, 19, 7)
+		require.NoError(t, err)
+		require.Len(t, locs, 1)
+		assert.Equal(t, 4, locs[0].Range.Start.Line)
+		assert.Equal(t, 0, locs[0].Range.Start.Character)
+	})
+
+	t.Run("Q", func(t *testing.T) {
+		locs, err := harness.Definition(testURI, 19, 13)
+		require.NoError(t, err)
+		require.Len(t, locs, 1)
+		assert.Equal(t, 5, locs[0].Range.Start.Line)
+		assert.Equal(t, 0, locs[0].Range.Start.Character)
+	})
+
+	t.Run("KBUILD_VERBOSE", func(t *testing.T) {
+		locs, err := harness.Definition(testURI, 19, 15)
+		require.NoError(t, err)
+		require.Len(t, locs, 1)
+		assert.Equal(t, 1, locs[0].Range.Start.Line)
+		assert.Equal(t, 2, locs[0].Range.Start.Character)
+	})
+
+	t.Run("override definition name", func(t *testing.T) {
+		locs, err := harness.Definition(testURI, 16, 10)
+		require.NoError(t, err)
+		require.Len(t, locs, 1)
+		assert.Equal(t, 1, locs[0].Range.Start.Line)
+		assert.Equal(t, 2, locs[0].Range.Start.Character)
+	})
+
+	t.Run("Q definition name", func(t *testing.T) {
+		locs, err := harness.Definition(testURI, 5, 0)
+		require.NoError(t, err)
+		require.Len(t, locs, 1)
+		assert.Equal(t, 5, locs[0].Range.Start.Line)
+		assert.Equal(t, 0, locs[0].Range.Start.Character)
+		assert.Equal(t, 1, locs[0].Range.End.Character)
+	})
+}
+
+func TestReferencesIncludeConditionalHeaders(t *testing.T) {
+	harness := newHarness(t)
+
+	input := `MODE := debug
+KBUILD_VERBOSE := 1
+ifeq ($(MODE),debug)
+	X := $(KBUILD_VERBOSE)
+endif
+`
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	t.Run("definition from ifeq header", func(t *testing.T) {
+		locs, err := harness.Definition(testURI, 2, 7)
+		require.NoError(t, err)
+		require.Len(t, locs, 1)
+		assert.Equal(t, 0, locs[0].Range.Start.Line)
+	})
+
+	t.Run("references from variable include ifeq header", func(t *testing.T) {
+		locs, err := harness.References(testURI, 0, 0, true)
+		require.NoError(t, err)
+		require.Len(t, locs, 2)
+		assert.Equal(t, 0, locs[0].Range.Start.Line)
+		assert.Equal(t, 2, locs[1].Range.Start.Line)
+	})
+
+	t.Run("references include nested value refs", func(t *testing.T) {
+		locs, err := harness.References(testURI, 1, 0, true)
+		require.NoError(t, err)
+		require.Len(t, locs, 2)
+		assert.Equal(t, 1, locs[0].Range.Start.Line)
+		assert.Equal(t, 3, locs[1].Range.Start.Line)
+	})
+}
+
+func TestDefinitionForComputedIncludePath(t *testing.T) {
+	harness := newHarness(t)
+	dir := t.TempDir()
+	scriptsDir := filepath.Join(dir, "scripts")
+	require.NoError(t, os.MkdirAll(scriptsDir, 0o755))
+	includePath := filepath.Join(scriptsDir, "Kbuild.include")
+	require.NoError(t, os.WriteFile(includePath, []byte("CC := gcc\n"), 0o644))
+
+	main := "srctree := " + dir + "\ninclude $(srctree)/scripts/Kbuild.include\n"
+	mainURI := lsp.DocumentURI("file://" + filepath.Join(dir, "Makefile"))
+	require.NoError(t, harness.DidOpen(mainURI, "makefile", main))
+
+	locs, err := harness.Definition(mainURI, 1, 24)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, lsp.DocumentURI("file://"+includePath), locs[0].URI)
 }
 
 func TestReferencesForTarget(t *testing.T) {

@@ -187,7 +187,7 @@ func (p *parser) parseLine() {
 	// include / -include / sinclude
 	if m := includeRe.FindStringSubmatch(trimmed); m != nil {
 		optional := strings.HasPrefix(m[1], "-") || strings.HasPrefix(m[1], "sinclude")
-		for _, path := range splitFields(m[2]) {
+		for _, path := range splitIncludeArgs(m[2]) {
 			p.includes = append(p.includes, &model.Include{
 				Path:     path,
 				Range:    lineRange(startLine, 0, len(line)),
@@ -418,9 +418,15 @@ func (p *parser) parseDefine(m []string, startLine int) {
 
 func (p *parser) parseConditional(m []string, startLine int) *model.Conditional {
 	condType := parseCondType(m[1])
+	args := strings.TrimSpace(m[2])
+	return p.parseConditionalBlock(condType, args, startLine, true)
+}
+
+func (p *parser) parseConditionalBlock(condType model.ConditionalType, args string, startLine int, consumeEndif bool) *model.Conditional {
 	cond := &model.Conditional{
-		Type: condType,
-		Args: strings.TrimSpace(m[2]),
+		Type:    condType,
+		Args:    args,
+		VarRefs: parseConditionalVarRefs(condType, args, startLine, p.lines[startLine]),
 		Range: lsp.Range{
 			Start: lsp.Position{Line: startLine, Character: 0},
 		},
@@ -434,11 +440,24 @@ func (p *parser) parseConditional(m []string, startLine int) *model.Conditional 
 
 		if trimmed == "endif" {
 			cond.Range.End = lsp.Position{Line: p.pos, Character: len(p.lines[p.pos])}
-			p.pos++
+			if consumeEndif {
+				p.pos++
+			}
 			return cond
 		}
 
-		if trimmed == "else" || strings.HasPrefix(trimmed, "else ") {
+		if trimmed == "else" {
+			inElse = true
+			p.pos++
+			continue
+		}
+		if strings.HasPrefix(trimmed, "else ") {
+			if cm := conditionalStartRe.FindStringSubmatch(strings.TrimSpace(strings.TrimPrefix(trimmed, "else "))); cm != nil {
+				inElse = true
+				nested := p.parseConditionalBlock(parseCondType(cm[1]), strings.TrimSpace(cm[2]), p.pos, false)
+				cond.ElseNodes = append(cond.ElseNodes, model.Node{Conditional: nested})
+				continue
+			}
 			inElse = true
 			p.pos++
 			continue
@@ -477,6 +496,47 @@ func (p *parser) parseConditional(m []string, startLine int) *model.Conditional 
 func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 	fullLine := p.lines[lineNum]
 
+	// export / unexport (may also be a variable assignment: export FOO = bar)
+	if m := exportRe.FindStringSubmatch(trimmed); m != nil {
+		rest := strings.TrimSpace(m[2])
+		if rest != "" {
+			if v := p.tryParseVarAssign(rest, lineNum, fullLine); v != nil {
+				v.Export = true
+				p.variables = append(p.variables, v)
+				return &model.Node{Variable: v}
+			}
+		}
+		dirType := model.DirExport
+		if m[1] == "unexport" {
+			dirType = model.DirUnexport
+		}
+		argsStr := strings.TrimSpace(m[2])
+		argsOffset := 0
+		if argsStr != "" {
+			if idx := strings.Index(fullLine, argsStr); idx >= 0 {
+				argsOffset = idx
+			}
+		}
+		d := &model.Directive{
+			Type:    dirType,
+			Args:    argsStr,
+			Range:   lineRange(lineNum, 0, len(fullLine)),
+			VarRefs: parseVarNames(argsStr, lineNum, argsOffset),
+		}
+		p.directives = append(p.directives, d)
+		return &model.Node{Directive: d}
+	}
+
+	// override directive — strip prefix and re-parse as variable assignment.
+	if strings.HasPrefix(trimmed, "override ") {
+		rest := strings.TrimPrefix(trimmed, "override ")
+		if v := p.tryParseVarAssign(rest, lineNum, fullLine); v != nil {
+			v.Override = true
+			p.variables = append(p.variables, v)
+			return &model.Node{Variable: v}
+		}
+	}
+
 	// Variable assignment
 	if v := p.tryParseVarAssign(trimmed, lineNum, fullLine); v != nil {
 		p.variables = append(p.variables, v)
@@ -486,8 +546,12 @@ func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 	// Include
 	if m := includeRe.FindStringSubmatch(trimmed); m != nil {
 		optional := strings.HasPrefix(m[1], "-") || strings.HasPrefix(m[1], "sinclude")
+		path := strings.TrimSpace(m[2])
+		if path == "" {
+			return nil
+		}
 		inc := &model.Include{
-			Path:     strings.TrimSpace(m[2]),
+			Path:     path,
 			Range:    lineRange(lineNum, 0, len(fullLine)),
 			Optional: optional,
 		}
@@ -496,6 +560,21 @@ func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 	}
 
 	return nil
+}
+
+func parseConditionalVarRefs(condType model.ConditionalType, args string, line int, fullLine string) []*model.VarRef {
+	idx := strings.Index(fullLine, args)
+	if idx < 0 {
+		idx = 0
+	}
+	switch condType {
+	case model.CondIfdef, model.CondIfndef:
+		return parseVarNames(args, line, idx)
+	case model.CondIfeq, model.CondIfneq:
+		return extractVarRefsAtOffset(args, line, idx)
+	default:
+		return nil
+	}
 }
 
 func parseCondType(s string) model.ConditionalType {
@@ -580,6 +659,10 @@ func parseVarNames(s string, line, colOffset int) []*model.VarRef {
 }
 
 func extractVarRefs(s string, line int) []*model.VarRef {
+	return extractVarRefsAtOffset(s, line, 0)
+}
+
+func extractVarRefsAtOffset(s string, line, colOffset int) []*model.VarRef {
 	matches := varRefRe.FindAllStringSubmatchIndex(s, -1)
 	if matches == nil {
 		return nil
@@ -590,8 +673,8 @@ func extractVarRefs(s string, line int) []*model.VarRef {
 		refs = append(refs, &model.VarRef{
 			Name: name,
 			Range: lsp.Range{
-				Start: lsp.Position{Line: line, Character: m[0]},
-				End:   lsp.Position{Line: line, Character: m[1]},
+				Start: lsp.Position{Line: line, Character: colOffset + m[0]},
+				End:   lsp.Position{Line: line, Character: colOffset + m[1]},
 			},
 		})
 	}
@@ -600,6 +683,43 @@ func extractVarRefs(s string, line int) []*model.VarRef {
 
 func splitFields(s string) []string {
 	return strings.Fields(strings.TrimSpace(s))
+}
+
+func splitIncludeArgs(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var parts []string
+	start := 0
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '$' && i+1 < len(s) && (s[i+1] == '(' || s[i+1] == '{') {
+			depth++
+			i++
+			continue
+		}
+		switch s[i] {
+		case ')', '}':
+			if depth > 0 {
+				depth--
+			}
+		case ' ', '\t':
+			if depth == 0 {
+				if part := strings.TrimSpace(s[start:i]); part != "" {
+					parts = append(parts, part)
+				}
+				for i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\t') {
+					i++
+				}
+				start = i + 1
+			}
+		}
+	}
+	if part := strings.TrimSpace(s[start:]); part != "" {
+		parts = append(parts, part)
+	}
+	return parts
 }
 
 func lineRange(line, startChar, endChar int) lsp.Range {

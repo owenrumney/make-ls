@@ -93,9 +93,10 @@ type VarRef struct {
 
 // Include represents an include or -include directive.
 type Include struct {
-	Path     string
-	Range    lsp.Range
-	Optional bool // true for -include / sinclude
+	Path         string
+	ResolvedPath string
+	Range        lsp.Range
+	Optional     bool // true for -include / sinclude
 }
 
 // Conditional represents an ifeq/ifneq/ifdef/ifndef block.
@@ -103,6 +104,7 @@ type Conditional struct {
 	Type      ConditionalType
 	Args      string
 	Range     lsp.Range
+	VarRefs   []*VarRef
 	ThenNodes []Node
 	ElseNodes []Node
 }

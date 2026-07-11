@@ -433,6 +433,21 @@ func TestDefinitionFromUnexportVarName(t *testing.T) {
 	assert.Equal(t, 0, locs[0].Range.Start.Line) // FOO defined on line 0
 }
 
+func TestDefinitionFromExportVarNameToOverrideVar(t *testing.T) {
+	harness := newHarness(t)
+
+	input := "override KBUILD_VERBOSE :=\nexport quiet Q KBUILD_VERBOSE\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	// Cursor on "KBUILD_VERBOSE" in "export quiet Q KBUILD_VERBOSE"
+	locs, err := harness.Definition(testURI, 1, 15)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 0, locs[0].Range.Start.Line)
+	assert.Equal(t, 9, locs[0].Range.Start.Character)
+	assert.Equal(t, 23, locs[0].Range.End.Character)
+}
+
 func TestReferencesForTarget(t *testing.T) {
 	harness := newHarness(t)
 

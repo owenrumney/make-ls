@@ -20,7 +20,9 @@ export function activate(context: ExtensionContext): void {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "makefile" }],
     synchronize: {
-      fileEvents: workspace.createFileSystemWatcher("**/{Makefile,makefile,GNUmakefile,*.mk,*.mak}"),
+      fileEvents: workspace.createFileSystemWatcher(
+        "**/{Makefile,makefile,GNUmakefile,*.mk,*.mak}",
+      ),
     },
   };
 
@@ -28,7 +30,7 @@ export function activate(context: ExtensionContext): void {
     "make-ls",
     "Makefile Language Server",
     serverOptions,
-    clientOptions
+    clientOptions,
   );
 
   client.start();

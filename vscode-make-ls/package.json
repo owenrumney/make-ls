@@ -55,6 +55,9 @@
   "scripts": {
     "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
     "watch": "npm run compile -- --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "npm run typecheck && npm run compile",
+    "format:check": "npx prettier@3.6.2 --check \"src/**/*.ts\" \"scripts/**/*.js\" \"*.json\"",
     "package": "npm run compile && node scripts/package.js",
     "vscode:prepublish": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --minify"
   },

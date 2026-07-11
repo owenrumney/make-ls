@@ -295,6 +295,20 @@ func TestParseOverrideVar(t *testing.T) {
 	v := m.Variables[0]
 	assert.Equal(t, "CC", v.Name)
 	assert.True(t, v.Override)
+	assert.Equal(t, 9, v.NameRange.Start.Character)
+	assert.Equal(t, 11, v.NameRange.End.Character)
+}
+
+func TestParseExportVarNameRange(t *testing.T) {
+	input := "export\tINSTALL_PATH ?= /boot"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Variables, 1)
+	v := m.Variables[0]
+	assert.Equal(t, "INSTALL_PATH", v.Name)
+	assert.True(t, v.Export)
+	assert.Equal(t, 7, v.NameRange.Start.Character)
+	assert.Equal(t, 19, v.NameRange.End.Character)
 }
 
 func TestParseVpathDirective(t *testing.T) {

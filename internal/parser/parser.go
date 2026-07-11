@@ -260,7 +260,7 @@ func (p *parser) parseLine() {
 			Flavour:     model.FlavourForOp(model.VarOp(m[3])),
 			TargetScope: targetName,
 			Range:       lineRange(startLine, 0, len(line)),
-			NameRange:   nameRange(startLine, trimmed, m[2]),
+			NameRange:   nameRangeInSegment(startLine, line, trimmed, m[2]),
 			Refs:        extractVarRefs(m[4], startLine),
 		}
 		p.variables = append(p.variables, v)
@@ -333,7 +333,7 @@ func (p *parser) parseLine() {
 			IsDoubleColon: isDouble,
 			DocComment:    p.buildDocComment(),
 			Range:         lineRange(startLine, 0, len(line)),
-			NameRange:     nameRange(startLine, trimmed, namesPart),
+			NameRange:     nameRangeInSegment(startLine, line, trimmed, namesPart),
 		}
 		p.targets = append(p.targets, t)
 		p.currentTarget = t
@@ -363,7 +363,7 @@ func (p *parser) tryParseVarAssign(s string, startLine int, fullLine string) *mo
 		Op:        op,
 		Flavour:   model.FlavourForOp(op),
 		Range:     lineRange(startLine, 0, len(fullLine)),
-		NameRange: nameRange(startLine, s, strings.TrimSpace(m[2])),
+		NameRange: nameRangeInSegment(startLine, fullLine, s, strings.TrimSpace(m[2])),
 		Refs:      extractVarRefs(m[4], startLine),
 	}
 }
@@ -610,13 +610,26 @@ func lineRange(line, startChar, endChar int) lsp.Range {
 }
 
 func nameRange(line int, fullLine, name string) lsp.Range {
-	idx := strings.Index(fullLine, name)
-	if idx < 0 {
-		idx = 0
+	return nameRangeInSegment(line, fullLine, fullLine, name)
+}
+
+func nameRangeInSegment(line int, fullLine, segment, name string) lsp.Range {
+	base := strings.Index(fullLine, segment)
+	if base < 0 {
+		base = 0
 	}
+	idx := strings.Index(segment, name)
+	if idx < 0 {
+		idx = strings.Index(fullLine, name)
+		base = 0
+		if idx < 0 {
+			idx = 0
+		}
+	}
+	col := base + idx
 	return lsp.Range{
-		Start: lsp.Position{Line: line, Character: idx},
-		End:   lsp.Position{Line: line, Character: idx + len(name)},
+		Start: lsp.Position{Line: line, Character: col},
+		End:   lsp.Position{Line: line, Character: col + len(name)},
 	}
 }
 

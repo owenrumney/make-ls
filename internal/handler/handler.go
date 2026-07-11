@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -375,6 +377,25 @@ func targetHover(t *model.Target) *lsp.Hover {
 	}
 }
 
+func preferEarlierVariableDefinition(mf *model.Makefile, current *model.Variable) *model.Variable {
+	if !current.Override {
+		return current
+	}
+	for i, v := range mf.Variables {
+		if v != current {
+			continue
+		}
+		for j := i - 1; j >= 0; j-- {
+			candidate := mf.Variables[j]
+			if candidate.Name == current.Name {
+				return candidate
+			}
+		}
+		break
+	}
+	return current
+}
+
 func findTarget(mf *model.Makefile, name string) *model.Target {
 	for _, t := range mf.Targets {
 		if t.Name == name {
@@ -540,6 +561,25 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 		}
 	}
 
+	// Cursor on a variable name → jump to its definition.
+	for _, v := range mf.Variables {
+		if inRange(pos, v.NameRange) {
+			target := preferEarlierVariableDefinition(mf, v)
+			return []lsp.Location{{
+				URI:   uri,
+				Range: enc.RangeToWire(target.NameRange),
+			}}, nil
+		}
+	}
+	for _, d := range mf.Defines {
+		if inRange(pos, d.Range) {
+			return []lsp.Location{{
+				URI:   uri,
+				Range: enc.RangeToWire(d.Range),
+			}}, nil
+		}
+	}
+
 	// Cursor on a variable reference → jump to variable definition.
 	if varName := varRefAtPosition(text, pos); varName != "" {
 		for _, v := range mf.Variables {
@@ -560,7 +600,7 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 		}
 	}
 
-	// Cursor on a variable name in export/unexport directive → jump to variable definition.
+	// Cursor on a variable name in directives/conditionals → jump to variable definition.
 	for _, dir := range mf.Directives {
 		for _, ref := range dir.VarRefs {
 			if inRange(pos, ref.Range) {
@@ -583,12 +623,36 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 			}
 		}
 	}
+	for _, ref := range conditionalVarRefs(mf.Conditionals) {
+		if inRange(pos, ref.Range) {
+			for _, v := range mf.Variables {
+				if v.Name == ref.Name {
+					return []lsp.Location{{
+						URI:   uri,
+						Range: enc.RangeToWire(v.NameRange),
+					}}, nil
+				}
+			}
+			for _, d := range mf.Defines {
+				if d.Name == ref.Name {
+					return []lsp.Location{{
+						URI:   uri,
+						Range: enc.RangeToWire(d.Range),
+					}}, nil
+				}
+			}
+		}
+	}
 
 	// Cursor on an include path → jump to file.
 	for _, inc := range mf.Includes {
 		if inRange(pos, inc.Range) {
+			path := inc.ResolvedPath
+			if path == "" {
+				path = inc.Path
+			}
 			return []lsp.Location{{
-				URI:   lsp.DocumentURI("file://" + inc.Path),
+				URI:   lsp.DocumentURI((&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()),
 				Range: lsp.Range{},
 			}}, nil
 		}
@@ -619,10 +683,15 @@ func (h *Handler) References(_ context.Context, params *lsp.ReferenceParams) ([]
 		}
 	}
 
-	// Cursor on a variable name → find all $(VAR) refs.
+	// Cursor on a variable name → find all variable refs.
 	for _, v := range mf.Variables {
 		if inRange(pos, v.NameRange) {
 			return findVarReferences(mf, uri, v.Name, params.Context.IncludeDeclaration, enc), nil
+		}
+	}
+	for _, ref := range conditionalVarRefs(mf.Conditionals) {
+		if inRange(pos, ref.Range) {
+			return findVarReferences(mf, uri, ref.Name, true, enc), nil
 		}
 	}
 
@@ -676,7 +745,39 @@ func findVarReferences(mf *model.Makefile, uri lsp.DocumentURI, name string, inc
 		}
 	}
 
+	for _, d := range mf.Directives {
+		for _, ref := range d.VarRefs {
+			if ref.Name == name {
+				locs = append(locs, lsp.Location{URI: uri, Range: enc.RangeToWire(ref.Range)})
+			}
+		}
+	}
+
+	for _, ref := range conditionalVarRefs(mf.Conditionals) {
+		if ref.Name == name {
+			locs = append(locs, lsp.Location{URI: uri, Range: enc.RangeToWire(ref.Range)})
+		}
+	}
+
 	return locs
+}
+
+func conditionalVarRefs(conds []*model.Conditional) []*model.VarRef {
+	var refs []*model.VarRef
+	for _, c := range conds {
+		refs = append(refs, c.VarRefs...)
+		for _, n := range c.ThenNodes {
+			if n.Conditional != nil {
+				refs = append(refs, conditionalVarRefs([]*model.Conditional{n.Conditional})...)
+			}
+		}
+		for _, n := range c.ElseNodes {
+			if n.Conditional != nil {
+				refs = append(refs, conditionalVarRefs([]*model.Conditional{n.Conditional})...)
+			}
+		}
+	}
+	return refs
 }
 
 // CodeAction handles textDocument/codeAction.

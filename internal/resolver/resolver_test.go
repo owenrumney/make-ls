@@ -177,6 +177,58 @@ func TestResolveFromDisk(t *testing.T) {
 	assert.Equal(t, "CC", mf.Variables[0].Name)
 }
 
+func TestResolveComputedIncludePath(t *testing.T) {
+	dir := t.TempDir()
+	scriptsDir := filepath.Join(dir, "scripts")
+	included := writeFile(t, scriptsDir, "Kbuild.include", "CC := gcc\n")
+	main := "srctree := " + dir + "\ninclude $(srctree)/scripts/Kbuild.include\n"
+	mainPath := writeFile(t, dir, "Makefile", main)
+
+	mf := Resolve(uriFor(mainPath), main)
+
+	require.Len(t, mf.Includes, 1)
+	assert.Equal(t, included, mf.Includes[0].ResolvedPath)
+	require.Len(t, mf.Variables, 2)
+	assert.Equal(t, "CC", mf.Variables[1].Name)
+}
+
+func TestResolveAddprefixIncludePath(t *testing.T) {
+	dir := t.TempDir()
+	scriptsDir := filepath.Join(dir, "scripts")
+	writeFile(t, scriptsDir, "one.mk", "ONE := yes\n")
+	writeFile(t, scriptsDir, "two.mk", "TWO := yes\n")
+	main := "srctree := " + dir + "\ninclude-y := scripts/one.mk scripts/two.mk\ninclude $(addprefix $(srctree)/, $(include-y))\n"
+	mainPath := writeFile(t, dir, "Makefile", main)
+
+	mf := Resolve(uriFor(mainPath), main)
+
+	names := map[string]bool{}
+	for _, v := range mf.Variables {
+		names[v.Name] = true
+	}
+	assert.True(t, names["ONE"])
+	assert.True(t, names["TWO"])
+	assert.Equal(t, filepath.Join(dir, "scripts", "one.mk"), mf.Includes[0].ResolvedPath)
+}
+
+func TestResolveWhitespaceComputedIncludePath(t *testing.T) {
+	dir := t.TempDir()
+	main := "EMPTY :=\ninclude $(EMPTY)\nall:\n\techo done\n"
+	mainPath := writeFile(t, dir, "Makefile", main)
+
+	mf := Resolve(uriFor(mainPath), main)
+
+	require.Len(t, mf.Targets, 1)
+	assert.Equal(t, "all", mf.Targets[0].Name)
+}
+
+func TestExtractDelimitedMixedNesting(t *testing.T) {
+	end, inner, ok := extractDelimited("$(foo ${bar})", 1)
+	require.True(t, ok)
+	assert.Equal(t, len("$(foo ${bar})")-1, end)
+	assert.Equal(t, "foo ${bar}", inner)
+}
+
 func TestResolveFromDiskMissing(t *testing.T) {
 	_, err := ResolveFromDisk("file:///nonexistent/Makefile")
 	assert.Error(t, err)

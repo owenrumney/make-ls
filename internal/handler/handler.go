@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -376,18 +378,20 @@ func targetHover(t *model.Target) *lsp.Hover {
 }
 
 func preferEarlierVariableDefinition(mf *model.Makefile, current *model.Variable) *model.Variable {
-	var best *model.Variable
-	for _, v := range mf.Variables {
-		if v.Name != current.Name {
-			continue
-		}
-		if v.NameRange.Start.Line > current.NameRange.Start.Line || (v.NameRange.Start.Line == current.NameRange.Start.Line && v.NameRange.Start.Character >= current.NameRange.Start.Character) {
-			continue
-		}
-		best = v
+	if !current.Override {
+		return current
 	}
-	if best != nil {
-		return best
+	for i, v := range mf.Variables {
+		if v != current {
+			continue
+		}
+		for j := i - 1; j >= 0; j-- {
+			candidate := mf.Variables[j]
+			if candidate.Name == current.Name {
+				return candidate
+			}
+		}
+		break
 	}
 	return current
 }
@@ -648,7 +652,7 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 				path = inc.Path
 			}
 			return []lsp.Location{{
-				URI:   lsp.DocumentURI("file://" + path),
+				URI:   lsp.DocumentURI((&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()),
 				Range: lsp.Range{},
 			}}, nil
 		}

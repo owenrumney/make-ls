@@ -138,9 +138,6 @@ func (e *evalContext) expandVar(name string) string {
 	}
 	e.stack[name] = true
 	defer delete(e.stack, name)
-	if v.Flavour == model.FlavourSimple {
-		return e.expandText(v.Value)
-	}
 	return e.expandText(v.Value)
 }
 

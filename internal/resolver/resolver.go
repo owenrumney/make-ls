@@ -126,5 +126,5 @@ func pathFromURI(uri lsp.DocumentURI) string {
 }
 
 func uriFromPath(path string) lsp.DocumentURI {
-	return lsp.DocumentURI("file://" + path)
+	return lsp.DocumentURI((&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String())
 }

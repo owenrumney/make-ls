@@ -4,6 +4,8 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/owenrumney/go-lsp v0.2.2 h1:xXT2lnGrJfM0U+JmoTK8lh40al5oFiMQ2yvIZowKydE=
 github.com/owenrumney/go-lsp v0.2.2/go.mod h1:+3+U1+SZ+wgGXHaAPPieRORYiSkritQBeHzoSCiwL34=
+github.com/owenrumney/go-lsp v0.2.4 h1:pbzhwz92Zh2U4VEP723/SX41lNWd0tierj8tHAtJifA=
+github.com/owenrumney/go-lsp v0.2.4/go.mod h1:+3+U1+SZ+wgGXHaAPPieRORYiSkritQBeHzoSCiwL34=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=

@@ -67,8 +67,7 @@ func TestInitializeCapabilities(t *testing.T) {
 	assert.Equal(t, lsp.SyncFull, caps.TextDocumentSync.Change)
 	require.NotNil(t, caps.HoverProvider)
 	assert.True(t, *caps.HoverProvider)
-	require.NotNil(t, caps.DocumentSymbolProvider)
-	assert.True(t, *caps.DocumentSymbolProvider)
+	assert.True(t, caps.DocumentSymbolProvider.Enabled())
 }
 
 func TestPickPositionEncoding(t *testing.T) {
@@ -164,9 +163,9 @@ build:
 	hover, err := harness.Hover(testURI, 1, 0)
 	require.NoError(t, err)
 	require.NotNil(t, hover)
-	assert.Contains(t, hover.Contents.Value, "build")
-	assert.Contains(t, hover.Contents.Value, "Build the project")
-	assert.Contains(t, hover.Contents.Value, "go build ./...")
+	assert.Contains(t, hover.Contents.Value(), "build")
+	assert.Contains(t, hover.Contents.Value(), "Build the project")
+	assert.Contains(t, hover.Contents.Value(), "go build ./...")
 }
 
 func TestHoverOnVariable(t *testing.T) {
@@ -178,8 +177,8 @@ func TestHoverOnVariable(t *testing.T) {
 	hover, err := harness.Hover(testURI, 0, 0)
 	require.NoError(t, err)
 	require.NotNil(t, hover)
-	assert.Contains(t, hover.Contents.Value, "CC")
-	assert.Contains(t, hover.Contents.Value, "gcc")
+	assert.Contains(t, hover.Contents.Value(), "CC")
+	assert.Contains(t, hover.Contents.Value(), "gcc")
 }
 
 func TestHoverOnVarRef(t *testing.T) {
@@ -194,7 +193,7 @@ OUT := $(CC) -o app
 	hover, err := harness.Hover(testURI, 1, 9)
 	require.NoError(t, err)
 	require.NotNil(t, hover)
-	assert.Contains(t, hover.Contents.Value, "CC")
+	assert.Contains(t, hover.Contents.Value(), "CC")
 }
 
 func TestHoverOnBuiltinVar(t *testing.T) {
@@ -207,7 +206,7 @@ func TestHoverOnBuiltinVar(t *testing.T) {
 	hover, err := harness.Hover(testURI, 0, 9)
 	require.NoError(t, err)
 	require.NotNil(t, hover)
-	assert.Contains(t, hover.Contents.Value, "MAKE")
+	assert.Contains(t, hover.Contents.Value(), "MAKE")
 }
 
 func TestHoverOnFunction(t *testing.T) {
@@ -220,7 +219,7 @@ func TestHoverOnFunction(t *testing.T) {
 	hover, err := harness.Hover(testURI, 0, 10)
 	require.NoError(t, err)
 	require.NotNil(t, hover)
-	assert.Contains(t, hover.Contents.Value, "wildcard")
+	assert.Contains(t, hover.Contents.Value(), "wildcard")
 }
 
 func TestHoverNoResult(t *testing.T) {

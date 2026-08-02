@@ -77,7 +77,7 @@ func (h *Handler) Initialize(_ context.Context, params *lsp.InitializeParams) (*
 				Save:      &lsp.SaveOptions{IncludeText: boolPtr(false)},
 			},
 			HoverProvider:          boolPtr(true),
-			DocumentSymbolProvider: boolPtr(true),
+			DocumentSymbolProvider: &lsp.DocumentSymbolOptions{},
 			CompletionProvider: &lsp.CompletionOptions{
 				TriggerCharacters: []string{"$", "("},
 			},
@@ -218,10 +218,7 @@ func (h *Handler) Hover(_ context.Context, params *lsp.HoverParams) (*lsp.Hover,
 		for _, av := range completion.AutoVars {
 			if av.Name == varName {
 				return &lsp.Hover{
-					Contents: lsp.MarkupContent{
-						Kind:  "markdown",
-						Value: fmt.Sprintf("**`$%s`** — %s", av.Name, av.Doc),
-					},
+					Contents: lsp.NewHoverContents(lsp.Markdown, fmt.Sprintf("**`$%s`** — %s", av.Name, av.Doc)),
 				}, nil
 			}
 		}
@@ -229,10 +226,7 @@ func (h *Handler) Hover(_ context.Context, params *lsp.HoverParams) (*lsp.Hover,
 		for _, fn := range completion.Functions {
 			if fn.Name == varName {
 				return &lsp.Hover{
-					Contents: lsp.MarkupContent{
-						Kind:  "markdown",
-						Value: fmt.Sprintf("**`%s`**\n\n%s", fn.Args, fn.Doc),
-					},
+					Contents: lsp.NewHoverContents(lsp.Markdown, fmt.Sprintf("**`%s`**\n\n%s", fn.Args, fn.Doc)),
 				}, nil
 			}
 		}
@@ -240,10 +234,7 @@ func (h *Handler) Hover(_ context.Context, params *lsp.HoverParams) (*lsp.Hover,
 		for _, bv := range completion.BuiltinVars {
 			if bv.Name == varName {
 				return &lsp.Hover{
-					Contents: lsp.MarkupContent{
-						Kind:  "markdown",
-						Value: fmt.Sprintf("**`%s`** — %s", bv.Name, bv.Doc),
-					},
+					Contents: lsp.NewHoverContents(lsp.Markdown, fmt.Sprintf("**`%s`** — %s", bv.Name, bv.Doc)),
 				}, nil
 			}
 		}
@@ -255,10 +246,7 @@ func (h *Handler) Hover(_ context.Context, params *lsp.HoverParams) (*lsp.Hover,
 					detail += fmt.Sprintf("\n\n*Target-specific for* `%s`", v.TargetScope)
 				}
 				return &lsp.Hover{
-					Contents: lsp.MarkupContent{
-						Kind:  "markdown",
-						Value: detail,
-					},
+					Contents: lsp.NewHoverContents(lsp.Markdown, detail),
 				}, nil
 			}
 		}
@@ -272,10 +260,7 @@ func (h *Handler) Hover(_ context.Context, params *lsp.HoverParams) (*lsp.Hover,
 				detail += fmt.Sprintf("\n\n*Target-specific for* `%s`", v.TargetScope)
 			}
 			return &lsp.Hover{
-				Contents: lsp.MarkupContent{
-					Kind:  "markdown",
-					Value: detail,
-				},
+				Contents: lsp.NewHoverContents(lsp.Markdown, detail),
 			}, nil
 		}
 	}
@@ -370,10 +355,7 @@ func targetHover(t *model.Target) *lsp.Hover {
 	}
 
 	return &lsp.Hover{
-		Contents: lsp.MarkupContent{
-			Kind:  "markdown",
-			Value: sb.String(),
-		},
+		Contents: lsp.NewHoverContents(lsp.Markdown, sb.String()),
 	}
 }
 

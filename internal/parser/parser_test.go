@@ -198,6 +198,18 @@ func TestParseStaticPatternRule(t *testing.T) {
 	assert.Equal(t, "%.c", tgt.PrereqPattern)
 }
 
+func TestParsePrefixedPatternRule(t *testing.T) {
+	input := `src/%: dest/%
+	$(CC) -c $< -o $@
+`
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Targets, 1)
+	tgt := m.Targets[0]
+	assert.True(t, tgt.IsPattern)
+	assert.Equal(t, "src/%", tgt.Name)
+}
+
 func TestParseOrderOnlyDeps(t *testing.T) {
 	input := `build: main.o utils.o | builddir
 	$(CC) -o $@ $^

@@ -50,9 +50,18 @@ func checkSpacesInRecipes(mf *model.Makefile) []lsp.Diagnostic {
 
 // checkUndefinedTargetDeps warns about deps that reference undefined targets.
 func checkUndefinedTargetDeps(mf *model.Makefile) []lsp.Diagnostic {
-	targetSet := make(map[string]bool, len(mf.Targets))
-	for _, t := range mf.Targets {
-		targetSet[t.Name] = true
+	foundTarget := func(s string) bool {
+		for _, t := range mf.Targets {
+			if t.Name == s {
+				return true
+			}
+			prefix, suffix, hasPattern := strings.Cut(t.Name, "%")
+			if hasPattern && len(s) > len(prefix)+len(suffix) &&
+				strings.HasPrefix(s, prefix) && strings.HasSuffix(s, suffix) {
+				return true
+			}
+		}
+		return false
 	}
 
 	var diags []lsp.Diagnostic
@@ -61,7 +70,7 @@ func checkUndefinedTargetDeps(mf *model.Makefile) []lsp.Diagnostic {
 			if shouldSkipDepCheck(dep.Name) {
 				continue
 			}
-			if !targetSet[dep.Name] {
+			if !foundTarget(dep.Name) {
 				sev := lsp.SeverityWarning
 				diags = append(diags, lsp.Diagnostic{
 					Range:    dep.Range,

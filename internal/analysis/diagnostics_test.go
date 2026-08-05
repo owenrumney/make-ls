@@ -63,6 +63,40 @@ func TestDiagnoseSkipsPatternDeps(t *testing.T) {
 	}
 }
 
+func TestDiagnoseFindsPatternDeps(t *testing.T) {
+	input := `all: src/main
+src/%: dest/%
+	$(CC) -o app $^
+`
+	mf := parser.Parse(testURI, input)
+	diags := Diagnose(mf)
+
+	for _, d := range diags {
+		if d.Severity != nil && *d.Severity == lsp.SeverityWarning {
+			assert.NotContains(t, d.Message, "undefined target")
+		}
+	}
+}
+
+func TestPatternRuleDoesNotSuppressUnrelatedWarnings(t *testing.T) {
+	input := `all: nonexistent
+	echo hi
+
+%.o: %.c
+	$(CC) -c $< -o $@
+`
+	mf := parser.Parse(testURI, input)
+	diags := Diagnose(mf)
+
+	var found bool
+	for _, d := range diags {
+		if d.Message == "undefined target: nonexistent" {
+			found = true
+		}
+	}
+	assert.True(t, found)
+}
+
 func TestDiagnoseSkipsFileDeps(t *testing.T) {
 	input := `all: main.o utils.o
 	$(CC) -o app $^

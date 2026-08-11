@@ -870,6 +870,7 @@ func (h *Handler) Formatting(_ context.Context, params *lsp.DocumentFormattingPa
 func formatMakefile(text string) string {
 	lines := strings.Split(text, "\n")
 	inRecipe := false
+	continued := false
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -877,6 +878,7 @@ func formatMakefile(text string) string {
 		// Empty line ends recipe context.
 		if trimmed == "" {
 			inRecipe = false
+			continued = false
 			lines[i] = ""
 			continue
 		}
@@ -884,14 +886,23 @@ func formatMakefile(text string) string {
 		// Comment lines — just trim trailing whitespace.
 		if strings.HasPrefix(trimmed, "#") {
 			lines[i] = strings.TrimRight(line, " \t")
+			continued = false
 			continue
 		}
 
 		// Recipe lines — ensure tab prefix, trim trailing whitespace.
 		if inRecipe && (line[0] == '\t' || line[0] == ' ') {
-			// Normalize: ensure tab, trim trailing spaces.
-			content := strings.TrimLeft(line, " \t")
-			lines[i] = "\t" + strings.TrimRight(content, " \t")
+			if continued {
+				// Part of the previous logical line. Everything after the
+				// leading tab is passed to the shell verbatim, so preserve the
+				// author's indentation and only guarantee the tab.
+				lines[i] = "\t" + strings.TrimRight(strings.TrimPrefix(line, "\t"), " \t")
+			} else {
+				// Normalize: ensure tab, trim trailing spaces.
+				content := strings.TrimLeft(line, " \t")
+				lines[i] = "\t" + strings.TrimRight(content, " \t")
+			}
+			continued = endsWithContinuation(lines[i])
 			continue
 		}
 
@@ -904,6 +915,7 @@ func formatMakefile(text string) string {
 
 		// Trim trailing whitespace on all other lines.
 		lines[i] = strings.TrimRight(line, " \t")
+		continued = endsWithContinuation(lines[i])
 	}
 
 	result := strings.Join(lines, "\n")
@@ -919,6 +931,16 @@ func formatMakefile(text string) string {
 	}
 
 	return result
+}
+
+// endsWithContinuation reports whether the line ends in an unescaped backslash,
+// making the following line part of the same logical line.
+func endsWithContinuation(line string) bool {
+	backslashes := 0
+	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
 }
 
 func isTargetLine(trimmed string) bool {

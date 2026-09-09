@@ -57,6 +57,10 @@ type Variable struct {
 	// Export is true when prefixed with export.
 	Export bool
 
+	// Private is true when prefixed with private (GNU Make >= 3.82); on a
+	// target-specific variable it blocks inheritance by prerequisites.
+	Private bool
+
 	// VarRefs found in the value.
 	Refs []*VarRef
 }
@@ -153,6 +157,11 @@ type Define struct {
 	Op    VarOp
 	Body  string
 	Range lsp.Range
+
+	// Leading modifier, if any: private, export or override.
+	Private  bool
+	Export   bool
+	Override bool
 }
 
 // Comment represents a comment line with its range.

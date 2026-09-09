@@ -19,8 +19,11 @@ var (
 	// Static pattern rule: targets: target-pattern: prereq-pattern
 	staticPatternRe = regexp.MustCompile(`^([^:=\t][^=]*?)\s*:\s*([^:]*%[^:]*)\s*:\s*(.*)$`)
 
-	// Target-specific variable: target: VAR = VALUE
-	targetVarRe = regexp.MustCompile(`^([^:=\t][^=]*?)\s*:\s*([\w.\-]+)\s*(\?=|\+?=|::?=|!=)\s*(.*)$`)
+	// Target-specific variable: target: [private|export|override] VAR = VALUE
+	targetVarRe = regexp.MustCompile(`^([^:=\t][^=]*?)\s*:\s*((?:(?:private|export|override)\s+)*)([\w.\-]+)\s*(\?=|\+?=|::?=|!=)\s*(.*)$`)
+
+	// Leading private/override/export modifier on an assignment.
+	varModifierRe = regexp.MustCompile(`^(private|override|export)\s+`)
 
 	// include / -include / sinclude
 	includeRe = regexp.MustCompile(`^(-?\s*include|sinclude)\s+(.+)$`)
@@ -28,8 +31,8 @@ var (
 	// Conditional directives
 	conditionalStartRe = regexp.MustCompile(`^(ifeq|ifneq|ifdef|ifndef)\s+(.*)$`)
 
-	// define / endef
-	defineRe = regexp.MustCompile(`^define\s+([\w.\-]+)(?:\s*(\?=|\+?=|::?=|!=|=))?\s*$`)
+	// define / endef, with optional private/export/override modifier
+	defineRe = regexp.MustCompile(`^(?:(private|export|override)\s+)?define\s+([\w.\-]+)(?:\s*(\?=|\+?=|::?=|!=|=))?\s*$`)
 
 	// export / unexport
 	exportRe = regexp.MustCompile(`^(export|unexport)(?:\s+(.*))?$`)
@@ -94,6 +97,34 @@ func (p *parser) parse() {
 		p.parseLine()
 	}
 	p.flushTarget()
+	p.attachTargetVars()
+}
+
+// attachTargetVars links target-specific variables to their targets. Runs after
+// parsing so an assignment may precede the rule it scopes.
+func (p *parser) attachTargetVars() {
+	byName := make(map[string][]*model.Target, len(p.targets))
+	for _, t := range p.targets {
+		for _, name := range splitFields(t.Name) {
+			byName[name] = append(byName[name], t)
+		}
+	}
+	for _, v := range p.variables {
+		if v.TargetScope == "" {
+			continue
+		}
+		// A scope or a rule may name several targets, so match name by name.
+		seen := map[*model.Target]bool{}
+		for _, scope := range splitFields(v.TargetScope) {
+			for _, t := range byName[scope] {
+				if seen[t] {
+					continue
+				}
+				seen[t] = true
+				t.Variables = append(t.Variables, v)
+			}
+		}
+	}
 }
 
 func (p *parser) parseLine() {
@@ -238,11 +269,12 @@ func (p *parser) parseLine() {
 		return
 	}
 
-	// override directive — strip prefix and re-parse as variable assignment.
-	if strings.HasPrefix(trimmed, "override ") {
-		rest := strings.TrimPrefix(trimmed, "override ")
+	// private / override / export modifiers — strip prefix and re-parse as variable assignment.
+	if rest, private, override, export := stripVarModifiers(trimmed); rest != trimmed {
 		if v := p.tryParseVarAssign(rest, startLine, line); v != nil {
-			v.Override = true
+			v.Private = private
+			v.Override = override
+			v.Export = export
 			p.variables = append(p.variables, v)
 			p.commentBlock = nil
 			p.pos++
@@ -252,24 +284,8 @@ func (p *parser) parseLine() {
 
 	// Target-specific variable: target: VAR = value
 	if m := targetVarRe.FindStringSubmatch(trimmed); m != nil {
-		targetName := strings.TrimSpace(m[1])
-		v := &model.Variable{
-			Name:        strings.TrimSpace(m[2]),
-			Value:       strings.TrimSpace(m[4]),
-			Op:          model.VarOp(m[3]),
-			Flavour:     model.FlavourForOp(model.VarOp(m[3])),
-			TargetScope: targetName,
-			Range:       lineRange(startLine, 0, len(line)),
-			NameRange:   nameRangeInSegment(startLine, line, trimmed, m[2]),
-			Refs:        extractVarRefs(m[4], startLine),
-		}
+		v := newTargetVar(m, startLine, line, trimmed)
 		p.variables = append(p.variables, v)
-		// Also attach to any matching target.
-		for _, t := range p.targets {
-			if t.Name == targetName {
-				t.Variables = append(t.Variables, v)
-			}
-		}
 		p.commentBlock = nil
 		p.pos++
 		return
@@ -380,11 +396,14 @@ func (p *parser) parseExportVar(m []string, startLine int, fullLine string) bool
 	if rest == "" {
 		return false
 	}
+	rest, private, override, _ := stripVarModifiers(rest)
 	v := p.tryParseVarAssign(rest, startLine, fullLine)
 	if v == nil {
 		return false
 	}
 	v.Export = true
+	v.Private = private
+	v.Override = override
 	p.variables = append(p.variables, v)
 	p.commentBlock = nil
 	p.pos++
@@ -392,10 +411,11 @@ func (p *parser) parseExportVar(m []string, startLine int, fullLine string) bool
 }
 
 func (p *parser) parseDefine(m []string, startLine int) {
-	name := m[1]
+	modifier := m[1]
+	name := m[2]
 	op := model.VarOp("=")
-	if m[2] != "" {
-		op = model.VarOp(m[2])
+	if m[3] != "" {
+		op = model.VarOp(m[3])
 	}
 
 	p.pos++
@@ -412,15 +432,37 @@ func (p *parser) parseDefine(m []string, startLine int) {
 	p.pos++ // skip endef
 
 	p.defines = append(p.defines, &model.Define{
-		Name: name,
-		Op:   op,
-		Body: strings.Join(body, "\n"),
+		Name:     name,
+		Op:       op,
+		Body:     strings.Join(body, "\n"),
+		Private:  modifier == "private",
+		Export:   modifier == "export",
+		Override: modifier == "override",
 		Range: lsp.Range{
 			Start: lsp.Position{Line: startLine, Character: 0},
 			End:   lsp.Position{Line: endLine, Character: len("endef")},
 		},
 	})
 	p.commentBlock = nil
+}
+
+// newTargetVar builds a target-specific variable from a targetVarRe match.
+func newTargetVar(m []string, line int, fullLine, trimmed string) *model.Variable {
+	op := model.VarOp(m[4])
+	name := strings.TrimSpace(m[3])
+	return &model.Variable{
+		Name:        name,
+		Value:       strings.TrimSpace(m[5]),
+		Op:          op,
+		Flavour:     model.FlavourForOp(op),
+		TargetScope: strings.TrimSpace(m[1]),
+		Private:     strings.Contains(m[2], "private"),
+		Override:    strings.Contains(m[2], "override"),
+		Export:      strings.Contains(m[2], "export"),
+		Range:       lineRange(line, 0, len(fullLine)),
+		NameRange:   nameRangeInSegment(line, fullLine, trimmed, name),
+		Refs:        extractVarRefs(m[5], line),
+	}
 }
 
 func (p *parser) parseConditional(m []string, startLine int) *model.Conditional {
@@ -534,14 +576,22 @@ func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 		return &model.Node{Directive: d}
 	}
 
-	// override directive — strip prefix and re-parse as variable assignment.
-	if strings.HasPrefix(trimmed, "override ") {
-		rest := strings.TrimPrefix(trimmed, "override ")
+	// private / override / export modifiers — strip prefix and re-parse as variable assignment.
+	if rest, private, override, export := stripVarModifiers(trimmed); rest != trimmed {
 		if v := p.tryParseVarAssign(rest, lineNum, fullLine); v != nil {
-			v.Override = true
+			v.Private = private
+			v.Override = override
+			v.Export = export
 			p.variables = append(p.variables, v)
 			return &model.Node{Variable: v}
 		}
+	}
+
+	// Target-specific variable: target: VAR = value
+	if m := targetVarRe.FindStringSubmatch(trimmed); m != nil {
+		v := newTargetVar(m, lineNum, fullLine, trimmed)
+		p.variables = append(p.variables, v)
+		return &model.Node{Variable: v}
 	}
 
 	// Variable assignment
@@ -733,6 +783,26 @@ func lineRange(line, startChar, endChar int) lsp.Range {
 	return lsp.Range{
 		Start: lsp.Position{Line: line, Character: startChar},
 		End:   lsp.Position{Line: line, Character: endChar},
+	}
+}
+
+// stripVarModifiers removes leading private/override/export prefixes from an assignment.
+func stripVarModifiers(s string) (rest string, private, override, export bool) {
+	rest = s
+	for {
+		m := varModifierRe.FindStringSubmatch(rest)
+		if m == nil {
+			return rest, private, override, export
+		}
+		switch m[1] {
+		case "private":
+			private = true
+		case "override":
+			override = true
+		case "export":
+			export = true
+		}
+		rest = rest[len(m[0]):]
 	}
 }
 

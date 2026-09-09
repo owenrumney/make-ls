@@ -238,6 +238,7 @@ func completeDirectives() []lsp.CompletionItem {
 		{"export", "Export variable to sub-makes"},
 		{"unexport", "Unexport variable"},
 		{"override", "Override command-line variable"},
+		{"private", "Do not pass a target variable to prerequisites"},
 		{"vpath", "Search path for prerequisites"},
 	}
 	items := make([]lsp.CompletionItem, 0, len(directives))

@@ -279,6 +279,148 @@ func TestParseTargetSpecificVar(t *testing.T) {
 	assert.Equal(t, "build", v.TargetScope)
 }
 
+func TestParseTargetSpecificPrivateVar(t *testing.T) {
+	// Example from issue #35.
+	input := `SOME_VAR := 1
+
+test-parent:
+	echo "Parent: $(SOME_VAR)"
+
+test-child: private SOME_VAR = 2
+test-child: test-parent
+	echo "Child: $(SOME_VAR)"
+`
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Variables, 2)
+	v := m.Variables[1]
+	assert.Equal(t, "SOME_VAR", v.Name)
+	assert.Equal(t, "2", v.Value)
+	assert.Equal(t, "test-child", v.TargetScope)
+	assert.True(t, v.Private)
+
+	require.Len(t, m.Targets, 2)
+	child := m.Targets[1]
+	require.Equal(t, "test-child", child.Name)
+	require.Len(t, child.Deps, 1)
+	assert.Equal(t, "test-parent", child.Deps[0].Name)
+	require.Len(t, child.Variables, 1)
+	assert.Equal(t, "SOME_VAR", child.Variables[0].Name)
+}
+
+func TestParseVarModifiers(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		varName  string
+		scope    string
+		private  bool
+		override bool
+		export   bool
+	}{
+		{name: "private target var", input: "build: private CC = clang", varName: "CC", scope: "build", private: true},
+		{name: "private and override", input: "build: private override CC = clang", varName: "CC", scope: "build", private: true, override: true},
+		{name: "export target var", input: "build: export CC = clang", varName: "CC", scope: "build", export: true},
+		{name: "global private", input: "private CC = clang", varName: "CC", private: true},
+		{name: "global override still works", input: "override CC = clang", varName: "CC", override: true},
+		{name: "export then private", input: "export private CC = clang", varName: "CC", private: true, export: true},
+		{name: "private then export", input: "private export CC = clang", varName: "CC", private: true, export: true},
+		{name: "var literally named export", input: "build: export = clang", varName: "export", scope: "build"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Parse(testURI, tt.input)
+			require.Len(t, m.Variables, 1)
+			v := m.Variables[0]
+			assert.Equal(t, tt.varName, v.Name)
+			assert.Equal(t, "clang", v.Value)
+			assert.Equal(t, tt.scope, v.TargetScope)
+			assert.Equal(t, tt.private, v.Private)
+			assert.Equal(t, tt.override, v.Override)
+			assert.Equal(t, tt.export, v.Export)
+		})
+	}
+}
+
+func TestParsePatternSpecificPrivateVar(t *testing.T) {
+	input := `%.o: private CFLAGS = -g`
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Variables, 1)
+	v := m.Variables[0]
+	assert.Equal(t, "CFLAGS", v.Name)
+	assert.Equal(t, "-g", v.Value)
+	assert.Equal(t, "%.o", v.TargetScope)
+	assert.True(t, v.Private)
+}
+
+func TestParseMultiTargetScopedVar(t *testing.T) {
+	input := `a b: private CC = clang
+a:
+	echo a
+b:
+	echo b
+`
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Variables, 1)
+	assert.Equal(t, "a b", m.Variables[0].TargetScope)
+
+	require.Len(t, m.Targets, 2)
+	for _, tgt := range m.Targets {
+		require.Len(t, tgt.Variables, 1, "target %s", tgt.Name)
+		assert.Equal(t, "CC", tgt.Variables[0].Name)
+	}
+}
+
+func TestParseTargetSpecificVarInConditional(t *testing.T) {
+	input := `ifeq ($(OS),Linux)
+test-child: private SOME_VAR = 2
+endif
+`
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Variables, 1)
+	v := m.Variables[0]
+	assert.Equal(t, "SOME_VAR", v.Name)
+	assert.Equal(t, "test-child", v.TargetScope)
+	assert.True(t, v.Private)
+
+	require.Len(t, m.Conditionals, 1)
+	require.Len(t, m.Conditionals[0].ThenNodes, 1)
+	assert.Equal(t, v, m.Conditionals[0].ThenNodes[0].Variable)
+}
+
+func TestParseDefineModifiers(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		private  bool
+		export   bool
+		override bool
+	}{
+		{name: "private", input: "private define GREET\nhello\nendef\n", private: true},
+		{name: "export", input: "export define GREET\nhello\nendef\n", export: true},
+		{name: "override", input: "override define GREET\nhello\nendef\n", override: true},
+		{name: "no modifier", input: "define GREET\nhello\nendef\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Parse(testURI, tt.input)
+			require.Len(t, m.Defines, 1)
+			d := m.Defines[0]
+			assert.Equal(t, "GREET", d.Name)
+			assert.Equal(t, "hello", d.Body)
+			assert.Equal(t, tt.private, d.Private)
+			assert.Equal(t, tt.export, d.Export)
+			assert.Equal(t, tt.override, d.Override)
+			assert.Empty(t, m.Targets)
+		})
+	}
+}
+
 func TestParseExportVar(t *testing.T) {
 	input := `export PATH := /usr/bin`
 	m := Parse(testURI, input)

@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/owenrumney/go-lsp/lsp"
@@ -25,6 +26,38 @@ clean:
 	mf := parser.Parse(testURI, input)
 	diags := Diagnose(mf)
 	assert.Empty(t, diags)
+}
+
+func TestDiagnosePrivateTargetVar(t *testing.T) {
+	// Example from issue #35: "private" must not be read as a dependency.
+	input := `SOME_VAR := 1
+
+test-parent:
+	echo "Parent: $(SOME_VAR)"
+
+test-child: private SOME_VAR = 2
+test-child: test-parent
+	echo "Child: $(SOME_VAR)"
+`
+	mf := parser.Parse(testURI, input)
+	msgs := diagMessages(Diagnose(mf))
+	assert.NotContains(t, msgs, "undefined target: private")
+	assert.NotContains(t, msgs, "undefined variable: SOME_VAR")
+}
+
+func TestDiagnosePrivateDefine(t *testing.T) {
+	input := `private define GREET
+hello
+endef
+
+all:
+	@echo $(GREET)
+`
+	mf := parser.Parse(testURI, input)
+	require.Len(t, mf.Defines, 1)
+	assert.Equal(t, "GREET", mf.Defines[0].Name)
+	assert.True(t, mf.Defines[0].Private)
+	assert.NotContains(t, diagMessages(Diagnose(mf)), "undefined")
 }
 
 func TestDiagnoseUndefinedTargetDep(t *testing.T) {
@@ -269,6 +302,14 @@ OUT := $(HELP_MSG)
 	for _, d := range diags {
 		assert.NotContains(t, d.Message, "HELP_MSG")
 	}
+}
+
+func diagMessages(diags []lsp.Diagnostic) string {
+	msgs := make([]string, 0, len(diags))
+	for _, d := range diags {
+		msgs = append(msgs, d.Message)
+	}
+	return strings.Join(msgs, "\n")
 }
 
 func contains(s, sub string) bool {

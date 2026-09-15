@@ -127,26 +127,66 @@ for (const f of vsixFiles) {
   console.log(`  ${f} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
 }
 
+const PUBLISH_TIMEOUT_MS = 300_000;
+const RETRY_DELAYS_MS = [5_000, 20_000, 60_000];
+const failures = [];
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Registry errors carry no exit code we can distinguish, so match the text.
+function isAlreadyPublished(output) {
+  return /already exists|already published|version number must increase/i.test(
+    output,
+  );
+}
+
+function isTransient(output) {
+  return /request timeout|etimedout|econnreset|socket hang up|getaddrinfo|50\d\b/i.test(
+    output,
+  );
+}
+
+function publishWithRetry(registry, file, run) {
+  console.log(`  ${file} → ${registry}`);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      process.stdout.write(run() || "");
+      return;
+    } catch (err) {
+      const output = `${err.stdout || ""}${err.stderr || ""}${err.message || ""}`;
+      process.stdout.write(output);
+      if (isAlreadyPublished(output)) {
+        console.log(`    already published, skipping`);
+        return;
+      }
+      if (attempt >= RETRY_DELAYS_MS.length || !isTransient(output)) {
+        console.error(`    FAILED: ${file} → ${registry}`);
+        failures.push(`${file} → ${registry}`);
+        return;
+      }
+      const delay = RETRY_DELAYS_MS[attempt];
+      console.error(`    transient error, retrying in ${delay / 1000}s`);
+      sleep(delay);
+    }
+  }
+}
+
 // Publish to VS Code Marketplace.
 if (process.env.VSCODE_PUBLISH_TOKEN) {
   console.log("\nPublishing to VS Code Marketplace...");
   for (const f of vsixFiles) {
     const vsixPath = path.join(EXT_DIR, f);
-    console.log(`  ${f}`);
-    try {
-      execSync(
-        `npx vsce publish --pat ${process.env.VSCODE_PUBLISH_TOKEN} --packagePath ${vsixPath}`,
-        {
-          cwd: EXT_DIR,
-          stdio: ["ignore", "inherit", "inherit"],
-          timeout: 120_000,
-        },
-      );
-    } catch (err) {
-      console.error(
-        `  Failed to publish ${f} to VS Code Marketplace: ${err.message}`,
-      );
-    }
+    publishWithRetry("VS Code Marketplace", f, () =>
+      execSync(`npx vsce publish --packagePath ${vsixPath}`, {
+        cwd: EXT_DIR,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf-8",
+        timeout: PUBLISH_TIMEOUT_MS,
+        env: { ...process.env, VSCE_PAT: process.env.VSCODE_PUBLISH_TOKEN },
+      }),
+    );
   }
 } else {
   console.log(
@@ -159,20 +199,24 @@ if (process.env.OPVSX_PUBLISH_TOKEN) {
   console.log("\nPublishing to Open VSX...");
   for (const f of vsixFiles) {
     const vsixPath = path.join(EXT_DIR, f);
-    console.log(`  ${f}`);
-    try {
-      execSync(
-        `npx ovsx publish ${vsixPath} -p ${process.env.OPVSX_PUBLISH_TOKEN}`,
-        {
-          cwd: EXT_DIR,
-          stdio: ["ignore", "inherit", "inherit"],
-          timeout: 120_000,
-        },
-      );
-    } catch (err) {
-      console.error(`  Failed to publish ${f} to Open VSX: ${err.message}`);
-    }
+    publishWithRetry("Open VSX", f, () =>
+      execSync(`npx ovsx publish ${vsixPath}`, {
+        cwd: EXT_DIR,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf-8",
+        timeout: PUBLISH_TIMEOUT_MS,
+        env: { ...process.env, OVSX_PAT: process.env.OPVSX_PUBLISH_TOKEN },
+      }),
+    );
   }
 } else {
   console.log("\nSkipping Open VSX publish (no OPVSX_PUBLISH_TOKEN).");
+}
+
+if (failures.length > 0) {
+  console.error(`\n${failures.length} publish(es) failed:`);
+  for (const f of failures) {
+    console.error(`  ${f}`);
+  }
+  process.exit(1);
 }

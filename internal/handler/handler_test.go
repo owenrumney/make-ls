@@ -386,6 +386,20 @@ func TestDefinitionFromVarRef(t *testing.T) {
 	assert.Equal(t, 0, locs[0].Range.Start.Line) // CC defined on line 0
 }
 
+func TestDefinitionFromVarRefToContinuedAssignment(t *testing.T) {
+	harness := newHarness(t)
+
+	input := "FIGURES = \\\n  foo \\\n  bar\n\nbuild/main.pdf: main.tex $(FIGURES)\n\tlatexmk -c $^\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	// Cursor on "FIGURES" inside $(FIGURES) on the rule line.
+	locs, err := harness.Definition(testURI, 4, 27)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, 0, locs[0].Range.Start.Line)
+	assert.Equal(t, 0, locs[0].Range.Start.Character)
+}
+
 func TestDefinitionNoResult(t *testing.T) {
 	harness := newHarness(t)
 

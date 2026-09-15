@@ -637,6 +637,73 @@ func TestParseLineContinuation(t *testing.T) {
 	require.Len(t, m.Variables, 1)
 	assert.Equal(t, "SOURCES", m.Variables[0].Name)
 	assert.Equal(t, "foo.c bar.c baz.c", m.Variables[0].Value)
+	assert.Equal(t, 0, m.Variables[0].NameRange.Start.Line)
+	assert.Equal(t, 0, m.Variables[0].Range.Start.Line)
+	assert.Equal(t, 2, m.Variables[0].Range.End.Line)
+}
+
+func TestParseTargetLineContinuationAnchor(t *testing.T) {
+	input := "build: main.c \\\n\tdep.c\n\tcc main.c\n"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Targets, 1)
+	target := m.Targets[0]
+	assert.Equal(t, 0, target.NameRange.Start.Line)
+	assert.Equal(t, 0, target.Range.Start.Line)
+	// The recipe line extends the target range past the continuation.
+	assert.Equal(t, 2, target.Range.End.Line)
+
+	require.Len(t, target.Deps, 2)
+	assert.Equal(t, "main.c", target.Deps[0].Name)
+	assert.Equal(t, lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 7},
+		End:   lsp.Position{Line: 0, Character: 13},
+	}, target.Deps[0].Range)
+	assert.Equal(t, "dep.c", target.Deps[1].Name)
+	assert.Equal(t, lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 1},
+		End:   lsp.Position{Line: 1, Character: 6},
+	}, target.Deps[1].Range)
+}
+
+func TestParseVarRefOnContinuationLine(t *testing.T) {
+	input := "BASE = /tmp\nFIGURES = \\\n  $(BASE)/foo\n"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Variables, 2)
+	v := m.Variables[1]
+	assert.Equal(t, "FIGURES", v.Name)
+	require.Len(t, v.Refs, 1)
+	assert.Equal(t, "BASE", v.Refs[0].Name)
+	assert.Equal(t, lsp.Range{
+		Start: lsp.Position{Line: 2, Character: 2},
+		End:   lsp.Position{Line: 2, Character: 9},
+	}, v.Refs[0].Range)
+}
+
+func TestParseVarRefColumn(t *testing.T) {
+	input := "BASE = /tmp\nOUT = $(BASE)/out\n"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Variables, 2)
+	require.Len(t, m.Variables[1].Refs, 1)
+	assert.Equal(t, lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 6},
+		End:   lsp.Position{Line: 1, Character: 13},
+	}, m.Variables[1].Refs[0].Range)
+}
+
+func TestParseContinuationInConditional(t *testing.T) {
+	input := "ifeq ($(OS),Linux)\nSOURCES = foo.c \\\nbar.c\nendif\n"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Variables, 1)
+	assert.Equal(t, "SOURCES", m.Variables[0].Name)
+	assert.Equal(t, "foo.c bar.c", m.Variables[0].Value)
+	assert.Equal(t, 1, m.Variables[0].Range.Start.Line)
+	assert.Equal(t, 2, m.Variables[0].Range.End.Line)
+	require.Len(t, m.Conditionals, 1)
+	assert.Equal(t, 3, m.Conditionals[0].Range.End.Line)
 }
 
 func TestParseComments(t *testing.T) {

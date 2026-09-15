@@ -128,15 +128,10 @@ func (p *parser) attachTargetVars() {
 }
 
 func (p *parser) parseLine() {
-	line := p.lines[p.pos]
-
-	// Join continuation lines.
-	for strings.HasSuffix(line, "\\") && p.pos+1 < len(p.lines) {
-		line = line[:len(line)-1] + p.lines[p.pos+1]
-		p.pos++
-	}
-
 	startLine := p.pos
+	line, endLine, spans := p.joinContinuations(startLine)
+	p.pos = endLine
+	at := logicalPos(startLine, spans)
 
 	// Empty line resets comment block and current target.
 	if strings.TrimSpace(line) == "" {
@@ -149,7 +144,7 @@ func (p *parser) parseLine() {
 	// Recipe line (tab-prefixed) — must check before anything else.
 	if len(line) > 0 && line[0] == '\t' && p.currentTarget != nil {
 		p.currentTarget.RecipeLines = append(p.currentTarget.RecipeLines, line[1:])
-		p.currentTarget.Range.End = lsp.Position{Line: startLine, Character: len(line)}
+		p.currentTarget.Range.End = lsp.Position{Line: endLine, Character: len(p.lines[endLine])}
 		p.pos++
 		return
 	}
@@ -160,7 +155,7 @@ func (p *parser) parseLine() {
 	if strings.HasPrefix(trimmed, "#") {
 		p.comments = append(p.comments, &model.Comment{
 			Text:  trimmed,
-			Range: lineRange(startLine, 0, len(line)),
+			Range: p.logicalRange(startLine, endLine),
 		})
 		if p.commentBlock == nil {
 			p.commentStart = startLine
@@ -185,7 +180,7 @@ func (p *parser) parseLine() {
 		if colonIdx >= 0 && colonIdx+1 <= len(line) {
 			depsPart = line[colonIdx+1:]
 		}
-		refs := parseDeps(depsPart, startLine, colonIdx+1)
+		refs := parseDeps(depsPart, colonIdx+1, at)
 		for _, ref := range refs {
 			p.phonies[ref.Name] = true
 			p.phonyRefs = append(p.phonyRefs, ref)
@@ -221,7 +216,7 @@ func (p *parser) parseLine() {
 		for _, path := range splitIncludeArgs(m[2]) {
 			p.includes = append(p.includes, &model.Include{
 				Path:     path,
-				Range:    lineRange(startLine, 0, len(line)),
+				Range:    p.logicalRange(startLine, endLine),
 				Optional: optional,
 			})
 		}
@@ -232,7 +227,7 @@ func (p *parser) parseLine() {
 
 	// export / unexport (may also be a variable assignment: export FOO = bar)
 	if m := exportRe.FindStringSubmatch(trimmed); m != nil {
-		if p.parseExportVar(m, startLine, line) {
+		if p.parseExportVar(m, startLine, endLine, line, at) {
 			return
 		}
 		dirType := model.DirExport
@@ -249,8 +244,8 @@ func (p *parser) parseLine() {
 		p.directives = append(p.directives, &model.Directive{
 			Type:    dirType,
 			Args:    argsStr,
-			Range:   lineRange(startLine, 0, len(line)),
-			VarRefs: parseVarNames(argsStr, startLine, argsOffset),
+			Range:   p.logicalRange(startLine, endLine),
+			VarRefs: parseVarNames(argsStr, argsOffset, at),
 		})
 		p.commentBlock = nil
 		p.pos++
@@ -262,7 +257,7 @@ func (p *parser) parseLine() {
 		p.directives = append(p.directives, &model.Directive{
 			Type:  model.DirVpath,
 			Args:  strings.TrimSpace(m[1]),
-			Range: lineRange(startLine, 0, len(line)),
+			Range: p.logicalRange(startLine, endLine),
 		})
 		p.commentBlock = nil
 		p.pos++
@@ -271,7 +266,7 @@ func (p *parser) parseLine() {
 
 	// private / override / export modifiers — strip prefix and re-parse as variable assignment.
 	if rest, private, override, export := stripVarModifiers(trimmed); rest != trimmed {
-		if v := p.tryParseVarAssign(rest, startLine, line); v != nil {
+		if v := p.tryParseVarAssign(rest, startLine, endLine, line, at); v != nil {
 			v.Private = private
 			v.Override = override
 			v.Export = export
@@ -284,7 +279,7 @@ func (p *parser) parseLine() {
 
 	// Target-specific variable: target: VAR = value
 	if m := targetVarRe.FindStringSubmatch(trimmed); m != nil {
-		v := newTargetVar(m, startLine, line, trimmed)
+		v := p.newTargetVar(m, startLine, endLine, line, trimmed, at)
 		p.variables = append(p.variables, v)
 		p.commentBlock = nil
 		p.pos++
@@ -292,7 +287,7 @@ func (p *parser) parseLine() {
 	}
 
 	// Variable assignment (simple, no target scope)
-	if v := p.tryParseVarAssign(trimmed, startLine, line); v != nil {
+	if v := p.tryParseVarAssign(trimmed, startLine, endLine, line, at); v != nil {
 		p.variables = append(p.variables, v)
 		p.commentBlock = nil
 		p.pos++
@@ -307,14 +302,14 @@ func (p *parser) parseLine() {
 			PrereqPattern: strings.TrimSpace(m[3]),
 			IsPattern:     true,
 			DocComment:    p.buildDocComment(),
-			Range:         lineRange(startLine, 0, len(line)),
-			NameRange:     nameRange(startLine, trimmed, strings.TrimSpace(m[1])),
+			Range:         p.logicalRange(startLine, endLine),
+			NameRange:     nameRange(trimmed, strings.TrimSpace(m[1]), at),
 		}
 		prereqOffset := strings.LastIndex(trimmed, m[3])
 		if prereqOffset < 0 {
 			prereqOffset = 0
 		}
-		t.Deps = parseDeps(m[3], startLine, prereqOffset)
+		t.Deps = parseDeps(m[3], indentOf(line)+prereqOffset, at)
 		p.targets = append(p.targets, t)
 		p.currentTarget = t
 		p.commentBlock = nil
@@ -332,7 +327,7 @@ func (p *parser) parseLine() {
 		isPattern := strings.Contains(namesPart, "%")
 
 		// Calculate column offset for deps in the full line.
-		depsColOffset := len(m[1]) + len(m[2])
+		depsColOffset := indentOf(line) + len(m[1]) + len(m[2])
 		// Account for leading whitespace trimmed from depsPart.
 		if raw := m[3]; len(raw) > 0 {
 			depsColOffset += len(raw) - len(strings.TrimLeft(raw, " \t"))
@@ -343,7 +338,7 @@ func (p *parser) parseLine() {
 		depsPart, comments, hasComments = strings.Cut(depsPart, "#")
 
 		// Parse deps, splitting on | for order-only.
-		deps, orderOnly := splitDepsOrderOnly(depsPart, startLine, depsColOffset)
+		deps, orderOnly := splitDepsOrderOnly(depsPart, depsColOffset, at)
 
 		t := &model.Target{
 			Name:          namesPart,
@@ -352,8 +347,8 @@ func (p *parser) parseLine() {
 			IsPattern:     isPattern,
 			IsDoubleColon: isDouble,
 			DocComment:    p.buildDocComment(),
-			Range:         lineRange(startLine, 0, len(line)),
-			NameRange:     nameRangeInSegment(startLine, line, trimmed, namesPart),
+			Range:         p.logicalRange(startLine, endLine),
+			NameRange:     nameRangeInSegment(line, trimmed, namesPart, at),
 		}
 		if hasComments {
 			t.LineComment = strings.TrimSpace(strings.TrimLeft(comments, "#"))
@@ -370,34 +365,71 @@ func (p *parser) parseLine() {
 	p.pos++
 }
 
+// joinContinuations joins backslash-continued lines starting at start. It
+// returns the joined line, the last physical line consumed, and the offset in
+// the joined line at which each physical line begins.
+func (p *parser) joinContinuations(start int) (string, int, []int) {
+	line := p.lines[start]
+	if !strings.HasSuffix(line, "\\") || start+1 >= len(p.lines) {
+		return line, start, []int{0}
+	}
+
+	var b strings.Builder
+	b.WriteString(line[:len(line)-1])
+	spans := []int{0}
+	pos := start + 1
+	for {
+		next := p.lines[pos]
+		spans = append(spans, b.Len())
+		if strings.HasSuffix(next, "\\") && pos+1 < len(p.lines) {
+			b.WriteString(next[:len(next)-1])
+			pos++
+			continue
+		}
+		b.WriteString(next)
+		return b.String(), pos, spans
+	}
+}
+
 func (p *parser) flushTarget() {
 	p.currentTarget = nil
 }
 
-func (p *parser) tryParseVarAssign(s string, startLine int, fullLine string) *model.Variable {
-	m := varAssignRe.FindStringSubmatch(s)
-	if m == nil {
+func (p *parser) tryParseVarAssign(s string, startLine, endLine int, fullLine string, at posFunc) *model.Variable {
+	loc := varAssignRe.FindStringSubmatchIndex(s)
+	if loc == nil {
 		return nil
 	}
-	op := model.VarOp(m[3])
+	name := strings.TrimSpace(s[loc[4]:loc[5]])
+	value := s[loc[8]:loc[9]]
+	op := model.VarOp(s[loc[6]:loc[7]])
 	return &model.Variable{
-		Name:      strings.TrimSpace(m[2]),
-		Value:     strings.TrimSpace(m[4]),
+		Name:      name,
+		Value:     strings.TrimSpace(value),
 		Op:        op,
 		Flavour:   model.FlavourForOp(op),
-		Range:     lineRange(startLine, 0, len(fullLine)),
-		NameRange: nameRangeInSegment(startLine, fullLine, s, strings.TrimSpace(m[2])),
-		Refs:      extractVarRefs(m[4], startLine),
+		Range:     p.logicalRange(startLine, endLine),
+		NameRange: nameRangeInSegment(fullLine, s, name, at),
+		Refs:      extractVarRefsAtOffset(value, offsetInLine(fullLine, s)+loc[8], at),
 	}
 }
 
-func (p *parser) parseExportVar(m []string, startLine int, fullLine string) bool {
+// logicalRange spans a logical line from its first physical line to its last,
+// which differ when continuations were joined.
+func (p *parser) logicalRange(startLine, endLine int) lsp.Range {
+	return lsp.Range{
+		Start: lsp.Position{Line: startLine, Character: 0},
+		End:   lsp.Position{Line: endLine, Character: len(p.lines[endLine])},
+	}
+}
+
+func (p *parser) parseExportVar(m []string, startLine, endLine int, fullLine string, at posFunc) bool {
 	rest := strings.TrimSpace(m[2])
 	if rest == "" {
 		return false
 	}
 	rest, private, override, _ := stripVarModifiers(rest)
-	v := p.tryParseVarAssign(rest, startLine, fullLine)
+	v := p.tryParseVarAssign(rest, startLine, endLine, fullLine, at)
 	if v == nil {
 		return false
 	}
@@ -447,9 +479,10 @@ func (p *parser) parseDefine(m []string, startLine int) {
 }
 
 // newTargetVar builds a target-specific variable from a targetVarRe match.
-func newTargetVar(m []string, line int, fullLine, trimmed string) *model.Variable {
+func (p *parser) newTargetVar(m []string, line, endLine int, fullLine, trimmed string, at posFunc) *model.Variable {
 	op := model.VarOp(m[4])
 	name := strings.TrimSpace(m[3])
+	valueOffset := offsetInLine(fullLine, trimmed) + len(trimmed) - len(m[5])
 	return &model.Variable{
 		Name:        name,
 		Value:       strings.TrimSpace(m[5]),
@@ -459,9 +492,9 @@ func newTargetVar(m []string, line int, fullLine, trimmed string) *model.Variabl
 		Private:     strings.Contains(m[2], "private"),
 		Override:    strings.Contains(m[2], "override"),
 		Export:      strings.Contains(m[2], "export"),
-		Range:       lineRange(line, 0, len(fullLine)),
-		NameRange:   nameRangeInSegment(line, fullLine, trimmed, name),
-		Refs:        extractVarRefs(m[5], line),
+		Range:       p.logicalRange(line, endLine),
+		NameRange:   nameRangeInSegment(fullLine, trimmed, name, at),
+		Refs:        extractVarRefsAtOffset(m[5], valueOffset, at),
 	}
 }
 
@@ -475,7 +508,7 @@ func (p *parser) parseConditionalBlock(condType model.ConditionalType, args stri
 	cond := &model.Conditional{
 		Type:    condType,
 		Args:    args,
-		VarRefs: parseConditionalVarRefs(condType, args, startLine, p.lines[startLine]),
+		VarRefs: parseConditionalVarRefs(condType, args, p.lines[startLine], linePos(startLine)),
 		Range: lsp.Range{
 			Start: lsp.Position{Line: startLine, Character: 0},
 		},
@@ -526,7 +559,8 @@ func (p *parser) parseConditionalBlock(condType model.ConditionalType, args stri
 
 		// Parse content inside conditional branches — we collect nodes for
 		// variables and targets found inside.
-		node := p.parseConditionalLine(trimmed, p.pos)
+		line, endLine, spans := p.joinContinuations(p.pos)
+		node := p.parseConditionalLine(line, p.pos, endLine, logicalPos(p.pos, spans))
 		if node != nil {
 			if inElse {
 				cond.ElseNodes = append(cond.ElseNodes, *node)
@@ -534,7 +568,7 @@ func (p *parser) parseConditionalBlock(condType model.ConditionalType, args stri
 				cond.ThenNodes = append(cond.ThenNodes, *node)
 			}
 		}
-		p.pos++
+		p.pos = endLine + 1
 	}
 
 	// Unterminated conditional — set end to last line.
@@ -542,14 +576,14 @@ func (p *parser) parseConditionalBlock(condType model.ConditionalType, args stri
 	return cond
 }
 
-func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
-	fullLine := p.lines[lineNum]
+func (p *parser) parseConditionalLine(fullLine string, startLine, endLine int, at posFunc) *model.Node {
+	trimmed := strings.TrimSpace(fullLine)
 
 	// export / unexport (may also be a variable assignment: export FOO = bar)
 	if m := exportRe.FindStringSubmatch(trimmed); m != nil {
 		rest := strings.TrimSpace(m[2])
 		if rest != "" {
-			if v := p.tryParseVarAssign(rest, lineNum, fullLine); v != nil {
+			if v := p.tryParseVarAssign(rest, startLine, endLine, fullLine, at); v != nil {
 				v.Export = true
 				p.variables = append(p.variables, v)
 				return &model.Node{Variable: v}
@@ -569,8 +603,8 @@ func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 		d := &model.Directive{
 			Type:    dirType,
 			Args:    argsStr,
-			Range:   lineRange(lineNum, 0, len(fullLine)),
-			VarRefs: parseVarNames(argsStr, lineNum, argsOffset),
+			Range:   p.logicalRange(startLine, endLine),
+			VarRefs: parseVarNames(argsStr, argsOffset, at),
 		}
 		p.directives = append(p.directives, d)
 		return &model.Node{Directive: d}
@@ -578,7 +612,7 @@ func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 
 	// private / override / export modifiers — strip prefix and re-parse as variable assignment.
 	if rest, private, override, export := stripVarModifiers(trimmed); rest != trimmed {
-		if v := p.tryParseVarAssign(rest, lineNum, fullLine); v != nil {
+		if v := p.tryParseVarAssign(rest, startLine, endLine, fullLine, at); v != nil {
 			v.Private = private
 			v.Override = override
 			v.Export = export
@@ -589,13 +623,13 @@ func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 
 	// Target-specific variable: target: VAR = value
 	if m := targetVarRe.FindStringSubmatch(trimmed); m != nil {
-		v := newTargetVar(m, lineNum, fullLine, trimmed)
+		v := p.newTargetVar(m, startLine, endLine, fullLine, trimmed, at)
 		p.variables = append(p.variables, v)
 		return &model.Node{Variable: v}
 	}
 
 	// Variable assignment
-	if v := p.tryParseVarAssign(trimmed, lineNum, fullLine); v != nil {
+	if v := p.tryParseVarAssign(trimmed, startLine, endLine, fullLine, at); v != nil {
 		p.variables = append(p.variables, v)
 		return &model.Node{Variable: v}
 	}
@@ -609,7 +643,7 @@ func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 		}
 		inc := &model.Include{
 			Path:     path,
-			Range:    lineRange(lineNum, 0, len(fullLine)),
+			Range:    p.logicalRange(startLine, endLine),
 			Optional: optional,
 		}
 		p.includes = append(p.includes, inc)
@@ -619,16 +653,16 @@ func (p *parser) parseConditionalLine(trimmed string, lineNum int) *model.Node {
 	return nil
 }
 
-func parseConditionalVarRefs(condType model.ConditionalType, args string, line int, fullLine string) []*model.VarRef {
+func parseConditionalVarRefs(condType model.ConditionalType, args, fullLine string, at posFunc) []*model.VarRef {
 	idx := strings.Index(fullLine, args)
 	if idx < 0 {
 		idx = 0
 	}
 	switch condType {
 	case model.CondIfdef, model.CondIfndef:
-		return parseVarNames(args, line, idx)
+		return parseVarNames(args, idx, at)
 	case model.CondIfeq, model.CondIfneq:
-		return extractVarRefsAtOffset(args, line, idx)
+		return extractVarRefsAtOffset(args, idx, at)
 	default:
 		return nil
 	}
@@ -658,18 +692,18 @@ func (p *parser) buildDocComment() string {
 
 // splitDepsOrderOnly splits a dep string on | into normal and order-only deps.
 // colOffset is the character offset where the dep string starts in the full line.
-func splitDepsOrderOnly(s string, line, colOffset int) ([]*model.DepRef, []*model.DepRef) {
+func splitDepsOrderOnly(s string, colOffset int, at posFunc) ([]*model.DepRef, []*model.DepRef) {
 	parts := strings.SplitN(s, "|", 2)
-	deps := parseDeps(parts[0], line, colOffset)
+	deps := parseDeps(parts[0], colOffset, at)
 	var orderOnly []*model.DepRef
 	if len(parts) > 1 {
 		pipeIdx := strings.Index(s, "|")
-		orderOnly = parseDeps(parts[1], line, colOffset+pipeIdx+1)
+		orderOnly = parseDeps(parts[1], colOffset+pipeIdx+1, at)
 	}
 	return deps, orderOnly
 }
 
-func parseDeps(s string, line, colOffset int) []*model.DepRef {
+func parseDeps(s string, colOffset int, at posFunc) []*model.DepRef {
 	var deps []*model.DepRef
 	offset := 0
 	for _, name := range splitFields(s) {
@@ -677,11 +711,8 @@ func parseDeps(s string, line, colOffset int) []*model.DepRef {
 		if idx >= 0 {
 			col := colOffset + offset + idx
 			deps = append(deps, &model.DepRef{
-				Name: name,
-				Range: lsp.Range{
-					Start: lsp.Position{Line: line, Character: col},
-					End:   lsp.Position{Line: line, Character: col + len(name)},
-				},
+				Name:  name,
+				Range: spanRange(at, col, len(name)),
 			})
 			offset = offset + idx + len(name)
 		}
@@ -695,7 +726,7 @@ func parseDeps(s string, line, colOffset int) []*model.DepRef {
 // strings.Fields returns tokens in left-to-right order and we advance offset
 // past each matched token, a name that is a prefix of another (e.g. "FOO" vs
 // "FOOBAR") is always found at its correct position.
-func parseVarNames(s string, line, colOffset int) []*model.VarRef {
+func parseVarNames(s string, colOffset int, at posFunc) []*model.VarRef {
 	var refs []*model.VarRef
 	offset := 0
 	for _, name := range splitFields(s) {
@@ -703,11 +734,8 @@ func parseVarNames(s string, line, colOffset int) []*model.VarRef {
 		if idx >= 0 {
 			col := colOffset + offset + idx
 			refs = append(refs, &model.VarRef{
-				Name: name,
-				Range: lsp.Range{
-					Start: lsp.Position{Line: line, Character: col},
-					End:   lsp.Position{Line: line, Character: col + len(name)},
-				},
+				Name:  name,
+				Range: spanRange(at, col, len(name)),
 			})
 			offset = offset + idx + len(name)
 		}
@@ -715,11 +743,7 @@ func parseVarNames(s string, line, colOffset int) []*model.VarRef {
 	return refs
 }
 
-func extractVarRefs(s string, line int) []*model.VarRef {
-	return extractVarRefsAtOffset(s, line, 0)
-}
-
-func extractVarRefsAtOffset(s string, line, colOffset int) []*model.VarRef {
+func extractVarRefsAtOffset(s string, colOffset int, at posFunc) []*model.VarRef {
 	matches := varRefRe.FindAllStringSubmatchIndex(s, -1)
 	if matches == nil {
 		return nil
@@ -728,11 +752,8 @@ func extractVarRefsAtOffset(s string, line, colOffset int) []*model.VarRef {
 	for _, m := range matches {
 		name := s[m[2]:m[3]]
 		refs = append(refs, &model.VarRef{
-			Name: name,
-			Range: lsp.Range{
-				Start: lsp.Position{Line: line, Character: colOffset + m[0]},
-				End:   lsp.Position{Line: line, Character: colOffset + m[1]},
-			},
+			Name:  name,
+			Range: spanRange(at, colOffset+m[0], m[1]-m[0]),
 		})
 	}
 	return refs
@@ -779,11 +800,50 @@ func splitIncludeArgs(s string) []string {
 	return parts
 }
 
-func lineRange(line, startChar, endChar int) lsp.Range {
-	return lsp.Range{
-		Start: lsp.Position{Line: line, Character: startChar},
-		End:   lsp.Position{Line: line, Character: endChar},
+// posFunc maps an offset in a logical line to a position in the document.
+type posFunc func(offset int) lsp.Position
+
+// logicalPos maps offsets in a joined logical line back to the physical line
+// they came from. spans holds each physical line's start offset in the join.
+func logicalPos(startLine int, spans []int) posFunc {
+	if len(spans) == 1 {
+		return linePos(startLine)
 	}
+	return func(offset int) lsp.Position {
+		i := len(spans) - 1
+		for i > 0 && spans[i] > offset {
+			i--
+		}
+		return lsp.Position{Line: startLine + i, Character: offset - spans[i]}
+	}
+}
+
+func linePos(line int) posFunc {
+	return func(offset int) lsp.Position {
+		return lsp.Position{Line: line, Character: offset}
+	}
+}
+
+// spanRange positions a token of length n. The end stays on the start's line:
+// a token never straddles a continuation, since the break splits it.
+func spanRange(at posFunc, offset, n int) lsp.Range {
+	start := at(offset)
+	return lsp.Range{
+		Start: start,
+		End:   lsp.Position{Line: start.Line, Character: start.Character + n},
+	}
+}
+
+// offsetInLine returns where segment starts within fullLine, 0 if absent.
+func offsetInLine(fullLine, segment string) int {
+	if idx := strings.Index(fullLine, segment); idx >= 0 {
+		return idx
+	}
+	return 0
+}
+
+func indentOf(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
 }
 
 // stripVarModifiers removes leading private/override/export prefixes from an assignment.
@@ -806,11 +866,11 @@ func stripVarModifiers(s string) (rest string, private, override, export bool) {
 	}
 }
 
-func nameRange(line int, fullLine, name string) lsp.Range {
-	return nameRangeInSegment(line, fullLine, fullLine, name)
+func nameRange(fullLine, name string, at posFunc) lsp.Range {
+	return nameRangeInSegment(fullLine, fullLine, name, at)
 }
 
-func nameRangeInSegment(line int, fullLine, segment, name string) lsp.Range {
+func nameRangeInSegment(fullLine, segment, name string, at posFunc) lsp.Range {
 	base := strings.Index(fullLine, segment)
 	if base < 0 {
 		base = 0
@@ -823,11 +883,7 @@ func nameRangeInSegment(line int, fullLine, segment, name string) lsp.Range {
 			idx = 0
 		}
 	}
-	col := base + idx
-	return lsp.Range{
-		Start: lsp.Position{Line: line, Character: col},
-		End:   lsp.Position{Line: line, Character: col + len(name)},
-	}
+	return spanRange(at, base+idx, len(name))
 }
 
 func splitLines(text string) []string {

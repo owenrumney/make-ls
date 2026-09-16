@@ -194,7 +194,7 @@ func (p *parser) parseLine() {
 
 	// define ... endef
 	if m := defineRe.FindStringSubmatch(trimmed); m != nil {
-		p.parseDefine(m, startLine)
+		p.parseDefine(m, startLine, line, at)
 		return
 	}
 
@@ -453,7 +453,7 @@ func (p *parser) parseExportVar(m []string, startLine, endLine int, fullLine str
 	return true
 }
 
-func (p *parser) parseDefine(m []string, startLine int) {
+func (p *parser) parseDefine(m []string, startLine int, fullLine string, at posFunc) {
 	modifier := m[1]
 	name := m[2]
 	op := model.VarOp("=")
@@ -463,22 +463,37 @@ func (p *parser) parseDefine(m []string, startLine int) {
 
 	p.pos++
 	var body []string
+	var bodyRefs []*model.VarRef
 	for p.pos < len(p.lines) {
 		if strings.TrimSpace(p.lines[p.pos]) == "endef" {
 			break
 		}
 		body = append(body, p.lines[p.pos])
+		// Indexed a line at a time: body lines are never joined, so the
+		// offsets are already physical.
+		bodyRefs = append(bodyRefs, p.extractVarRefsAtOffset(p.lines[p.pos], 0, linePos(p.pos))...)
 		p.pos++
 	}
 
 	endLine := p.pos
 	p.pos++ // skip endef
 
+	// Offsets index the joined header, which is what defineRe matched: a
+	// continuation can split the keyword or push the name onto the next line.
+	nameOff := strings.Index(fullLine, "define") + len("define")
+	nameOff += strings.Index(fullLine[nameOff:], name)
+	nameRange := spanRange(at, nameOff, len(name))
+	// A name split by a continuation would otherwise end past its line.
+	if eol := len(p.lines[nameRange.Start.Line]); nameRange.End.Character > eol {
+		nameRange.End.Character = eol
+	}
+
 	p.defines = append(p.defines, &model.Define{
 		URI:      p.uri,
 		Name:     name,
 		Op:       op,
 		Body:     strings.Join(body, "\n"),
+		BodyRefs: bodyRefs,
 		Private:  modifier == "private",
 		Export:   modifier == "export",
 		Override: modifier == "override",
@@ -486,6 +501,7 @@ func (p *parser) parseDefine(m []string, startLine int) {
 			Start: lsp.Position{Line: startLine, Character: 0},
 			End:   lsp.Position{Line: endLine, Character: len("endef")},
 		},
+		NameRange: nameRange,
 	})
 	p.commentBlock = nil
 }

@@ -1276,3 +1276,74 @@ func TestReferencesOnCallMacroSite(t *testing.T) {
 	require.Len(t, defs, 1)
 	assert.Equal(t, 0, defs[0].Range.Start.Line)
 }
+
+func TestReferencesOnSubstitutionReference(t *testing.T) {
+	harness := newHarness(t)
+	// line 1: "OBJ := $(SRC:%.c=%.o)" — cursor on SRC inside the substitution.
+	input := "SRC := a.c\nOBJ := $(SRC:%.c=%.o)\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "the declaration and the substitution use")
+
+	defs, err := harness.Definition(testURI, 1, 9)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 0, defs[0].Range.Start.Line)
+}
+
+func TestReferencesInsideDefineBody(t *testing.T) {
+	harness := newHarness(t)
+	// line 2: "\t$(CC) -o $@ $<" inside the define body.
+	input := "CC := gcc\ndefine build\n\t$(CC) -o $@ $<\nendef\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 0, 0, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "the declaration and the use in the define body")
+
+	fromBody, err := harness.References(testURI, 2, 4, true)
+	require.NoError(t, err)
+	require.Len(t, fromBody, 2, "the same pair, asked from inside the body")
+
+	defs, err := harness.Definition(testURI, 2, 4)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 0, defs[0].Range.Start.Line)
+}
+
+func TestDefinitionOnDefineName(t *testing.T) {
+	harness := newHarness(t)
+	require.NoError(t, harness.DidOpen(testURI, "makefile", "define build\n\techo hi\nendef\n"))
+
+	defs, err := harness.Definition(testURI, 0, 8)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 0, defs[0].Range.Start.Line)
+	assert.Equal(t, 7, defs[0].Range.Start.Character, "the name, not the block")
+	assert.Equal(t, 12, defs[0].Range.End.Character)
+}
+
+func TestDefinitionOnDefineKeyword(t *testing.T) {
+	harness := newHarness(t)
+	require.NoError(t, harness.DidOpen(testURI, "makefile", "define build\n\techo hi\nendef\n"))
+
+	// The keyword is not the name: only the name resolves to the define.
+	defs, err := harness.Definition(testURI, 0, 2)
+	require.NoError(t, err)
+	assert.Empty(t, defs)
+}
+
+func TestReferencesOnSubstitutionReferenceInPrerequisite(t *testing.T) {
+	harness := newHarness(t)
+	// line 1: "all: $(SRC:%.c=%.o)" — cursor on SRC inside the prerequisite.
+	input := "SRC := a.c\nall: $(SRC:%.c=%.o)\n\techo hi\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 1, 7, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "the declaration and the use, not the prerequisite span")
+	assert.Equal(t, 0, locs[0].Range.Start.Line, "the SRC declaration")
+	assert.Equal(t, 1, locs[1].Range.Start.Line, "the use inside the prerequisite")
+}

@@ -900,9 +900,11 @@ func (h *Handler) Definition(_ context.Context, params *lsp.DefinitionParams) ([
 			return le.one(target.URI, target.NameRange), nil
 		}
 	}
+	// NameRange, not Range: a cursor in the body belongs to whatever it sits
+	// on, not to the enclosing define.
 	for _, d := range mf.Defines {
-		if d.URI == uri && inRange(pos, d.Range) {
-			return le.one(d.URI, d.Range), nil
+		if d.URI == uri && inRange(pos, d.NameRange) {
+			return le.one(d.URI, d.NameRange), nil
 		}
 	}
 
@@ -949,7 +951,7 @@ func definitionsFor(mf *model.Makefile, le *locEncoder, name string) []lsp.Locat
 	}
 	for _, d := range mf.Defines {
 		if d.Name == name {
-			return le.one(d.URI, d.Range)
+			return le.one(d.URI, d.NameRange)
 		}
 	}
 	return nil
@@ -989,7 +991,19 @@ func (h *Handler) References(_ context.Context, params *lsp.ReferenceParams) ([]
 	// builtin call falls through instead: $(call NAME,...) names a macro, and
 	// the indexed refs below carry its span.
 	if name, call := varRefAtPosition(text, pos); name != "" && !isBuiltinCall(name, call) {
-		return varRefs(name), nil
+		if locs := varRefs(name); len(locs) > 0 {
+			return locs, nil
+		}
+		// A substitution reference yields the whole "NAME:pat=repl" above; the
+		// indexed ref under the cursor carries NAME. Resolved here, before the
+		// prerequisite loop, or an enclosing prerequisite answers instead.
+		for _, ref := range mf.VarRefs {
+			if ref.URI == uri && inRange(pos, ref.Range) {
+				if locs := varRefs(ref.Name); len(locs) > 0 {
+					return locs, nil
+				}
+			}
+		}
 	}
 
 	// Cursor on a target name → find all deps referencing it.
@@ -1013,7 +1027,7 @@ func (h *Handler) References(_ context.Context, params *lsp.ReferenceParams) ([]
 		}
 	}
 	for _, d := range mf.Defines {
-		if d.URI == uri && inRange(pos, d.Range) {
+		if d.URI == uri && inRange(pos, d.NameRange) {
 			return varRefs(d.Name), nil
 		}
 	}

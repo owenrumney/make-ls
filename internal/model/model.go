@@ -186,6 +186,12 @@ type Define struct {
 	Body  string
 	Range lsp.Range
 
+	// NameRange covers the name on the define line; Range covers the block.
+	NameRange lsp.Range
+
+	// BodyRefs are the $(VAR) uses inside Body.
+	BodyRefs []*VarRef
+
 	// Leading modifier, if any: private, export or override.
 	Private  bool
 	Export   bool

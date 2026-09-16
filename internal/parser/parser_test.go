@@ -394,16 +394,17 @@ endif
 
 func TestParseDefineModifiers(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		private  bool
-		export   bool
-		override bool
+		name      string
+		input     string
+		private   bool
+		export    bool
+		override  bool
+		nameRange lsp.Range
 	}{
-		{name: "private", input: "private define GREET\nhello\nendef\n", private: true},
-		{name: "export", input: "export define GREET\nhello\nendef\n", export: true},
-		{name: "override", input: "override define GREET\nhello\nendef\n", override: true},
-		{name: "no modifier", input: "define GREET\nhello\nendef\n"},
+		{name: "private", input: "private define GREET\nhello\nendef\n", private: true, nameRange: spanAt(0, 15, 5)},
+		{name: "export", input: "export define GREET\nhello\nendef\n", export: true, nameRange: spanAt(0, 14, 5)},
+		{name: "override", input: "override define GREET\nhello\nendef\n", override: true, nameRange: spanAt(0, 16, 5)},
+		{name: "no modifier", input: "define GREET\nhello\nendef\n", nameRange: spanAt(0, 7, 5)},
 	}
 
 	for _, tt := range tests {
@@ -416,6 +417,7 @@ func TestParseDefineModifiers(t *testing.T) {
 			assert.Equal(t, tt.private, d.Private)
 			assert.Equal(t, tt.export, d.Export)
 			assert.Equal(t, tt.override, d.Override)
+			assert.Equal(t, tt.nameRange, d.NameRange)
 			assert.Empty(t, m.Targets)
 		})
 	}
@@ -1059,4 +1061,48 @@ func TestSourcesHoldsParsedText(t *testing.T) {
 	m := Parse(testURI, input)
 
 	assert.Equal(t, input, m.Sources[testURI])
+}
+
+func TestParseDefineBodyRefs(t *testing.T) {
+	input := "define build\n\t$(CC) -c\n\techo $(FLAGS)\nendef\n"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Defines, 1)
+	refs := m.Defines[0].BodyRefs
+	require.Len(t, refs, 2)
+	assert.Equal(t, "CC", refs[0].Name)
+	assert.Equal(t, 1, refs[0].Range.Start.Line)
+	assert.Equal(t, 1, refs[0].Range.Start.Character)
+	assert.Equal(t, "FLAGS", refs[1].Name)
+	assert.Equal(t, 2, refs[1].Range.Start.Line)
+	assert.Equal(t, 6, refs[1].Range.Start.Character)
+
+	assert.Contains(t, m.VarRefs, refs[0], "body refs join the file-wide index")
+}
+
+// The header is matched after continuations are joined, so the name range has
+// to come back through that mapping, not from the first physical line.
+func TestParseDefineNameRangeAcrossContinuations(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  lsp.Range
+	}{
+		{name: "single line", input: "define build\n\techo hi\nendef\n", want: spanAt(0, 7, 5)},
+		{name: "name on next line", input: "define \\\nbuild\n\techo hi\nendef\n", want: spanAt(1, 0, 5)},
+		{name: "keyword split", input: "de\\\nfine build\n\techo hi\nendef\n", want: spanAt(1, 5, 5)},
+		{name: "name split", input: "define b\\\nuild\n\techo hi\nendef\n", want: lsp.Range{
+			Start: lsp.Position{Line: 0, Character: 7},
+			End:   lsp.Position{Line: 0, Character: 9},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Parse(testURI, tt.input)
+			require.Len(t, m.Defines, 1)
+			assert.Equal(t, "build", m.Defines[0].Name)
+			assert.Equal(t, tt.want, m.Defines[0].NameRange)
+		})
+	}
 }

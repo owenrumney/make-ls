@@ -57,6 +57,10 @@
     "watch": "npm run compile -- --watch",
     "typecheck": "tsc --noEmit",
     "lint": "npm run typecheck && npm run compile",
+    "build:server": "go build -o bin/make-ls ../cmd/make-ls",
+    "compile:test": "esbuild src/test/extension.test.ts --bundle --outfile=out/test/extension.test.js --external:vscode --external:mocha --format=cjs --platform=node --sourcemap",
+    "pretest": "npm run compile && npm run compile:test && npm run build:server",
+    "test": "vscode-test",
     "format:check": "npx prettier@3.6.2 --check \"src/**/*.ts\" \"scripts/**/*.js\" \"*.json\"",
     "package": "npm run compile && node scripts/package.js",
     "vscode:prepublish": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --minify"
@@ -65,10 +69,14 @@
     "vscode-languageclient": "^10.1.1"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.19.43",
     "@types/vscode": "1.82.0",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.2",
+    "mocha": "^10.8.2",
     "ovsx": "^0.10.12",
     "typescript": "^5.9.3"
   }

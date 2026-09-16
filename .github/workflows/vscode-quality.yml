@@ -27,3 +27,10 @@ jobs:
 
       - name: Check types and build
         run: npm run lint
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run extension tests
+        run: xvfb-run -a npm test

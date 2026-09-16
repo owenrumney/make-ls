@@ -143,9 +143,12 @@ func workspaceRoots(params *lsp.InitializeParams) []lsp.DocumentURI {
 		}
 		return roots
 	}
+	// Deprecated in the protocol, but a client older than 3.6 sends only these.
+	//nolint:staticcheck
 	if params.RootURI != nil && *params.RootURI != "" {
 		return []lsp.DocumentURI{*params.RootURI}
 	}
+	//nolint:staticcheck
 	if params.RootPath != nil && *params.RootPath != "" {
 		return []lsp.DocumentURI{uriForPath(*params.RootPath)}
 	}

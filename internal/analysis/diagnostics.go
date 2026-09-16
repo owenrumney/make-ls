@@ -15,10 +15,40 @@ var conventionalPhonies = map[string]bool{
 	"lint": true, "fmt": true, "help": true, "run": true,
 }
 
+// Diag is a diagnostic tagged with the file that owns the node it flags.
+type Diag struct {
+	URI lsp.DocumentURI
+	lsp.Diagnostic
+}
+
 // Diagnose runs all diagnostic checks on a parsed Makefile and returns LSP diagnostics.
 func Diagnose(mf *model.Makefile) []lsp.Diagnostic {
+	tagged := diagnose(mf)
 	//nolint:prealloc
 	var diags []lsp.Diagnostic
+	for _, d := range tagged {
+		diags = append(diags, d.Diagnostic)
+	}
+	return diags
+}
+
+// DiagnoseByURI groups diagnostics by owning file. A merged model spans several
+// files, and a range only means anything against its own file's text.
+func DiagnoseByURI(mf *model.Makefile) map[lsp.DocumentURI][]lsp.Diagnostic {
+	byURI := make(map[lsp.DocumentURI][]lsp.Diagnostic)
+	for _, d := range diagnose(mf) {
+		uri := d.URI
+		if uri == "" {
+			uri = mf.URI
+		}
+		byURI[uri] = append(byURI[uri], d.Diagnostic)
+	}
+	return byURI
+}
+
+func diagnose(mf *model.Makefile) []Diag {
+	//nolint:prealloc
+	var diags []Diag
 	diags = append(diags, checkSpacesInRecipes(mf)...)
 	diags = append(diags, checkUndefinedTargetDeps(mf)...)
 	diags = append(diags, checkUndefinedVarRefs(mf)...)
@@ -27,8 +57,8 @@ func Diagnose(mf *model.Makefile) []lsp.Diagnostic {
 }
 
 // checkSpacesInRecipes flags recipe lines that start with spaces instead of tabs.
-func checkSpacesInRecipes(mf *model.Makefile) []lsp.Diagnostic {
-	var diags []lsp.Diagnostic
+func checkSpacesInRecipes(mf *model.Makefile) []Diag {
+	var diags []Diag
 	for _, t := range mf.Targets {
 		recipeLine := t.Range.Start.Line + 1
 		for i, line := range t.RecipeLines {
@@ -49,7 +79,7 @@ func checkSpacesInRecipes(mf *model.Makefile) []lsp.Diagnostic {
 }
 
 // checkUndefinedTargetDeps warns about deps that reference undefined targets.
-func checkUndefinedTargetDeps(mf *model.Makefile) []lsp.Diagnostic {
+func checkUndefinedTargetDeps(mf *model.Makefile) []Diag {
 	foundTarget := func(s string) bool {
 		for _, t := range mf.Targets {
 			if t.Name == s {
@@ -64,7 +94,7 @@ func checkUndefinedTargetDeps(mf *model.Makefile) []lsp.Diagnostic {
 		return false
 	}
 
-	var diags []lsp.Diagnostic
+	var diags []Diag
 	for _, t := range mf.Targets {
 		for _, dep := range append(t.Deps, t.OrderOnlyDeps...) {
 			if shouldSkipDepCheck(dep.Name) {
@@ -72,12 +102,12 @@ func checkUndefinedTargetDeps(mf *model.Makefile) []lsp.Diagnostic {
 			}
 			if !foundTarget(dep.Name) {
 				sev := lsp.SeverityWarning
-				diags = append(diags, lsp.Diagnostic{
+				diags = append(diags, Diag{URI: dep.URI, Diagnostic: lsp.Diagnostic{
 					Range:    dep.Range,
 					Severity: &sev,
 					Source:   "make-ls",
 					Message:  "undefined target: " + dep.Name,
-				})
+				}})
 			}
 		}
 	}
@@ -100,10 +130,10 @@ func shouldSkipDepCheck(name string) bool {
 }
 
 // checkUndefinedVarRefs warns about references to undefined variables.
-func checkUndefinedVarRefs(mf *model.Makefile) []lsp.Diagnostic {
+func checkUndefinedVarRefs(mf *model.Makefile) []Diag {
 	defined := collectDefinedVars(mf)
 
-	var diags []lsp.Diagnostic
+	var diags []Diag
 
 	for _, v := range mf.Variables {
 		for _, ref := range v.Refs {
@@ -111,12 +141,12 @@ func checkUndefinedVarRefs(mf *model.Makefile) []lsp.Diagnostic {
 				continue
 			}
 			sev := lsp.SeverityWarning
-			diags = append(diags, lsp.Diagnostic{
+			diags = append(diags, Diag{URI: ref.URI, Diagnostic: lsp.Diagnostic{
 				Range:    ref.Range,
 				Severity: &sev,
 				Source:   "make-ls",
 				Message:  "undefined variable: " + ref.Name,
-			})
+			}})
 		}
 	}
 	return diags
@@ -164,20 +194,20 @@ func shouldSkipVarRefCheck(name string, defined map[string]bool, flavour model.V
 }
 
 // checkMissingPhony hints when conventional phony targets lack .PHONY declarations.
-func checkMissingPhony(mf *model.Makefile) []lsp.Diagnostic {
-	var diags []lsp.Diagnostic
+func checkMissingPhony(mf *model.Makefile) []Diag {
+	var diags []Diag
 	for _, t := range mf.Targets {
 		if t.IsPattern {
 			continue
 		}
 		if conventionalPhonies[t.Name] && !mf.Phonies[t.Name] {
 			sev := lsp.SeverityHint
-			diags = append(diags, lsp.Diagnostic{
+			diags = append(diags, Diag{URI: t.URI, Diagnostic: lsp.Diagnostic{
 				Range:    t.NameRange,
 				Severity: &sev,
 				Source:   "make-ls",
 				Message:  t.Name + " looks like a phony target; consider adding .PHONY: " + t.Name,
-			})
+			}})
 		}
 	}
 	return diags

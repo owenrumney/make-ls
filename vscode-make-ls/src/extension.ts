@@ -19,11 +19,6 @@ export function activate(context: ExtensionContext): void {
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "makefile" }],
-    synchronize: {
-      fileEvents: workspace.createFileSystemWatcher(
-        "**/{Makefile,makefile,GNUmakefile,*.mk,*.mak}",
-      ),
-    },
   };
 
   client = new LanguageClient(

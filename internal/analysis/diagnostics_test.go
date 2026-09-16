@@ -324,3 +324,22 @@ func containsStr(s, sub string) bool {
 	}
 	return false
 }
+
+func TestDiagnoseIgnoresTargetScopeRefs(t *testing.T) {
+	// The scope names targets, not a value: it must not reach the
+	// undefined-variable check.
+	mf := parser.Parse(testURI, "$(PROGS): CFLAGS = -g\n")
+
+	for _, d := range Diagnose(mf) {
+		assert.NotContains(t, d.Message, "undefined variable: PROGS")
+	}
+}
+
+func TestDiagnoseIgnoresEscapedDollar(t *testing.T) {
+	// $$(FOO) is shell command substitution, not a make reference.
+	mf := parser.Parse(testURI, "A := $$(FOO)\n")
+
+	for _, d := range Diagnose(mf) {
+		assert.NotContains(t, d.Message, "undefined variable: FOO")
+	}
+}

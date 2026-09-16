@@ -1,9 +1,11 @@
 package resolver
 
 import (
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/owenrumney/go-lsp/lsp"
@@ -11,17 +13,32 @@ import (
 	"github.com/owenrumney/make-ls/internal/parser"
 )
 
+// SourceOf returns the text of uri and whether the server has it open. It lets
+// an include resolve from an unsaved buffer rather than from disk.
+type SourceOf func(lsp.DocumentURI) (string, bool)
+
 // Resolve parses the given Makefile and recursively resolves all include
 // directives, returning a merged model. Circular includes are detected and
 // skipped. Optional includes (-include / sinclude) silently skip missing files.
-func Resolve(uri lsp.DocumentURI, text string) *model.Makefile {
+// A nil src means disk only.
+func Resolve(uri lsp.DocumentURI, text string, src SourceOf) *model.Makefile {
+	return ResolveIn(nil, uri, text, src)
+}
+
+// ResolveIn is Resolve with the client's workspace folders as extra roots, so
+// a Makefile in a subdirectory can reach "include ../common.mk". Without them
+// the only root is the Makefile's own directory.
+func ResolveIn(workspace []lsp.DocumentURI, uri lsp.DocumentURI, text string, src SourceOf) *model.Makefile {
+	dir := dirFromURI(uri)
 	r := &resolver{
-		seen: map[string]bool{},
+		seen:  map[string]bool{},
+		src:   src,
+		roots: rootsFor(dir, workspace),
 	}
 	root := parser.Parse(uri, text)
-	dir := dirFromURI(uri)
 	r.seen[string(uri)] = true
 	r.resolve(root, dir)
+	root.UnresolvedIncludes = r.unresolved
 	return root
 }
 
@@ -34,17 +51,27 @@ func ResolveFromDisk(uri lsp.DocumentURI) (*model.Makefile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Resolve(uri, string(data)), nil
+	return Resolve(uri, string(data), nil), nil
 }
 
 type resolver struct {
-	seen map[string]bool // visited URIs to detect circular includes
+	seen  map[string]bool // visited URIs to detect circular includes
+	src   SourceOf
+	roots []string // directory trees includes may read from
+
+	// unresolved collects includes at any depth that named a file with no
+	// readable content; merge drops child.Includes, so nothing else carries
+	// them up to the root.
+	unresolved []lsp.DocumentURI
 }
 
 func (r *resolver) resolve(mf *model.Makefile, baseDir string) {
 	for _, inc := range mf.Includes {
 		paths := resolveIncludePaths(mf, baseDir, inc)
 		for _, incPath := range paths {
+			if !r.pathAllowed(incPath) {
+				continue
+			}
 			if inc.ResolvedPath == "" {
 				inc.ResolvedPath = incPath
 			}
@@ -54,20 +81,92 @@ func (r *resolver) resolve(mf *model.Makefile, baseDir string) {
 			}
 			r.seen[string(incURI)] = true
 
-			// #nosec G304 -- include paths are resolved from parsed Makefile content by design.
-			data, err := os.ReadFile(incPath)
-			if err != nil {
-				if inc.Optional {
-					continue // -include / sinclude: silently skip
-				}
-				continue // non-optional but missing: skip (diagnostics will catch this)
+			text, ok := r.sourceFor(incURI, incPath)
+			if !ok {
+				// Missing: optional includes skip silently, the rest are left
+				// for diagnostics. Either way the path is worth watching.
+				r.unresolved = append(r.unresolved, incURI)
+				continue
 			}
 
-			child := parser.Parse(incURI, string(data))
+			child := parser.Parse(incURI, text)
 			r.resolve(child, filepath.Dir(incPath))
 			merge(mf, child)
 		}
 	}
+}
+
+// maxIncludeSize bounds the text retained for any one included file.
+const maxIncludeSize = 4 << 20
+
+// sourceFor prefers an open buffer over disk, so ranges and text always come
+// from the same bytes. Includes are confined to the resolver's roots and disk
+// reads accept only bounded regular files.
+func (r *resolver) sourceFor(uri lsp.DocumentURI, path string) (text string, ok bool) {
+	if !r.pathAllowed(path) {
+		return "", false
+	}
+	if r.src != nil {
+		if text, ok := r.src(uri); ok {
+			return text, true
+		}
+	}
+
+	// #nosec G304 -- path has been confined to the resolver roots above.
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			text, ok = "", false
+		}
+	}()
+
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxIncludeSize {
+		return "", false
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxIncludeSize+1))
+	if err != nil || len(data) > maxIncludeSize {
+		return "", false
+	}
+	return string(data), true
+}
+
+// canonicalPath resolves symlinks when possible so an include cannot escape
+// through a symlink beneath the root directory.
+func canonicalPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
+}
+
+func (r *resolver) pathAllowed(path string) bool {
+	canon := canonicalPath(path)
+	for _, root := range r.roots {
+		if pathWithin(root, canon) {
+			return true
+		}
+	}
+	return false
+}
+
+func rootsFor(dir string, workspace []lsp.DocumentURI) []string {
+	roots := []string{canonicalPath(dir)}
+	for _, w := range workspace {
+		if !strings.HasPrefix(string(w), "file://") {
+			continue
+		}
+		roots = append(roots, canonicalPath(pathFromURI(w)))
+	}
+	return roots
+}
+
+func pathWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func resolveIncludePaths(mf *model.Makefile, baseDir string, inc *model.Include) []string {
@@ -102,6 +201,10 @@ func merge(parent, child *model.Makefile) {
 	parent.Conditionals = append(parent.Conditionals, child.Conditionals...)
 	parent.Comments = append(parent.Comments, child.Comments...)
 	parent.PhonyRefs = append(parent.PhonyRefs, child.PhonyRefs...)
+	parent.VarRefs = append(parent.VarRefs, child.VarRefs...)
+	for uri, text := range child.Sources {
+		parent.Sources[uri] = text
+	}
 	for k, v := range child.Phonies {
 		if v {
 			parent.Phonies[k] = true
@@ -119,12 +222,26 @@ func pathFromURI(uri lsp.DocumentURI) string {
 	if strings.HasPrefix(s, "file://") {
 		u, err := url.Parse(s)
 		if err == nil {
-			return u.Path
+			path := u.Path
+			// file URIs on Windows use /c%3A/... while filesystem paths use C:\\....
+			if runtime.GOOS == "windows" && len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+				path = path[1:]
+			}
+			return filepath.FromSlash(path)
 		}
 	}
 	return s
 }
 
 func uriFromPath(path string) lsp.DocumentURI {
-	return lsp.DocumentURI((&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String())
+	path = filepath.ToSlash(path)
+	if len(path) >= 2 && path[1] == ':' {
+		// VS Code canonicalizes drive letters and escapes their colon in file
+		// URIs; matching that spelling keeps URI-keyed maps coherent on Windows.
+		path = strings.ToLower(path[:1]) + path[1:]
+		u := &url.URL{Scheme: "file", Path: "/" + path}
+		u.RawPath = strings.Replace(u.EscapedPath(), ":", "%3A", 1)
+		return lsp.DocumentURI(u.String())
+	}
+	return lsp.DocumentURI((&url.URL{Scheme: "file", Path: path}).String())
 }

@@ -19,12 +19,16 @@ func writeFile(t *testing.T, dir, name, content string) string {
 }
 
 func uriFor(path string) lsp.DocumentURI {
-	return lsp.DocumentURI("file://" + path)
+	return uriFromPath(path)
+}
+
+func TestURIFromWindowsPath(t *testing.T) {
+	assert.Equal(t, lsp.DocumentURI("file:///c%3A/Users/owen/Makefile"), uriFromPath("C:/Users/owen/Makefile"))
 }
 
 func TestResolveNoIncludes(t *testing.T) {
 	input := "CC := gcc\nall:\n\t$(CC) -o app\n"
-	mf := Resolve("file:///test/Makefile", input)
+	mf := Resolve("file:///test/Makefile", input, nil)
 
 	require.Len(t, mf.Variables, 1)
 	require.Len(t, mf.Targets, 1)
@@ -38,7 +42,7 @@ func TestResolveWithInclude(t *testing.T) {
 	main := "include config.mk\nall:\n\t$(CC) $(CFLAGS) -o app\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	// Should have CC and CFLAGS from config.mk plus no extra from main.
 	assert.Len(t, mf.Variables, 2)
@@ -58,7 +62,7 @@ func TestResolveWithTargetsFromInclude(t *testing.T) {
 	main := "include targets.mk\nall: clean\n\techo done\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	assert.Len(t, mf.Targets, 2) // all + clean
 	targetNames := map[string]bool{}
@@ -77,7 +81,7 @@ func TestResolvePhoniesFromInclude(t *testing.T) {
 	main := "include phony.mk\n.PHONY: all\nall:\n\techo done\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	assert.True(t, mf.Phonies["all"])
 	assert.True(t, mf.Phonies["clean"])
@@ -89,7 +93,7 @@ func TestResolveOptionalIncludeMissing(t *testing.T) {
 	main := "-include nonexistent.mk\nall:\n\techo done\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	// Should not panic or error — just skip.
 	require.Len(t, mf.Targets, 1)
@@ -102,7 +106,7 @@ func TestResolveSincludeMissing(t *testing.T) {
 	main := "sinclude nonexistent.mk\nall:\n\techo done\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	require.Len(t, mf.Targets, 1)
 }
@@ -116,7 +120,7 @@ func TestResolveCircularInclude(t *testing.T) {
 	main := "include a.mk\nall:\n\techo done\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	// Should not infinite loop. Both variables should be present.
 	names := map[string]bool{}
@@ -136,7 +140,7 @@ func TestResolveNestedIncludes(t *testing.T) {
 	main := "include level1.mk\nall:\n\techo done\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	names := map[string]bool{}
 	for _, v := range mf.Variables {
@@ -155,13 +159,40 @@ func TestResolveRelativePath(t *testing.T) {
 	main := "include sub/extra.mk\nall:\n\techo done\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	names := map[string]bool{}
 	for _, v := range mf.Variables {
 		names[v.Name] = true
 	}
 	assert.True(t, names["EXTRA"])
+}
+
+func TestResolveRejectsIncludeOutsideRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "project")
+	outside := writeFile(t, parent, "outside.mk", "SECRET := value\n")
+	main := "include ../outside.mk\n"
+	mainPath := writeFile(t, root, "Makefile", main)
+
+	mf := Resolve(uriFor(mainPath), main, nil)
+
+	assert.Empty(t, mf.Variables)
+	assert.Empty(t, mf.UnresolvedIncludes)
+	assert.Empty(t, mf.Includes[0].ResolvedPath)
+	assert.NotContains(t, mf.Sources, uriFor(outside))
+}
+
+func TestResolveRejectsOversizedInclude(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "large.mk"), make([]byte, maxIncludeSize+1), 0o600))
+	main := "include large.mk\n"
+	mainPath := writeFile(t, dir, "Makefile", main)
+
+	mf := Resolve(uriFor(mainPath), main, nil)
+
+	assert.Empty(t, mf.Variables)
+	assert.Equal(t, []lsp.DocumentURI{uriFor(filepath.Join(dir, "large.mk"))}, mf.UnresolvedIncludes)
 }
 
 func TestResolveFromDisk(t *testing.T) {
@@ -184,7 +215,7 @@ func TestResolveComputedIncludePath(t *testing.T) {
 	main := "srctree := " + dir + "\ninclude $(srctree)/scripts/Kbuild.include\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	require.Len(t, mf.Includes, 1)
 	assert.Equal(t, included, mf.Includes[0].ResolvedPath)
@@ -200,7 +231,7 @@ func TestResolveAddprefixIncludePath(t *testing.T) {
 	main := "srctree := " + dir + "\ninclude-y := scripts/one.mk scripts/two.mk\ninclude $(addprefix $(srctree)/, $(include-y))\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	names := map[string]bool{}
 	for _, v := range mf.Variables {
@@ -216,7 +247,7 @@ func TestResolveWhitespaceComputedIncludePath(t *testing.T) {
 	main := "EMPTY :=\ninclude $(EMPTY)\nall:\n\techo done\n"
 	mainPath := writeFile(t, dir, "Makefile", main)
 
-	mf := Resolve(uriFor(mainPath), main)
+	mf := Resolve(uriFor(mainPath), main, nil)
 
 	require.Len(t, mf.Targets, 1)
 	assert.Equal(t, "all", mf.Targets[0].Name)
@@ -232,4 +263,86 @@ func TestExtractDelimitedMixedNesting(t *testing.T) {
 func TestResolveFromDiskMissing(t *testing.T) {
 	_, err := ResolveFromDisk("file:///nonexistent/Makefile")
 	assert.Error(t, err)
+}
+
+func TestResolvePrefersSourceProviderOverDisk(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "config.mk", "CC := gcc\n")
+
+	main := "include config.mk\nOUT := $(CC)\n"
+	mainPath := writeFile(t, dir, "Makefile", main)
+	incURI := uriFor(filepath.Join(dir, "config.mk"))
+
+	buffer := "CC := clang\nLD := ld\n"
+	mf := Resolve(uriFor(mainPath), main, func(u lsp.DocumentURI) (string, bool) {
+		if u == incURI {
+			return buffer, true
+		}
+		return "", false
+	})
+
+	names := map[string]string{}
+	for _, v := range mf.Variables {
+		names[v.Name] = v.Value
+	}
+	assert.Equal(t, "clang", names["CC"])
+	assert.Contains(t, names, "LD")
+
+	// Sources must hold exactly what was parsed, or ranges encode wrongly.
+	assert.Equal(t, buffer, mf.Sources[incURI])
+	assert.Equal(t, main, mf.Sources[uriFor(mainPath)])
+}
+
+func TestResolveFallsBackToDiskWhenProviderMisses(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "config.mk", "CC := gcc\n")
+
+	main := "include config.mk\n"
+	mainPath := writeFile(t, dir, "Makefile", main)
+
+	mf := Resolve(uriFor(mainPath), main, func(lsp.DocumentURI) (string, bool) {
+		return "", false
+	})
+
+	require.Len(t, mf.Variables, 1)
+	assert.Equal(t, "gcc", mf.Variables[0].Value)
+	assert.Equal(t, "CC := gcc\n", mf.Sources[uriFor(filepath.Join(dir, "config.mk"))])
+}
+
+func TestResolveInAllowsIncludeWithinWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	common := writeFile(t, workspace, "common.mk", "CC := gcc\n")
+	main := "include ../common.mk\n"
+	mainPath := writeFile(t, filepath.Join(workspace, "sub"), "Makefile", main)
+
+	mf := ResolveIn([]lsp.DocumentURI{uriFor(workspace)}, uriFor(mainPath), main, nil)
+
+	require.Len(t, mf.Variables, 1)
+	assert.Equal(t, "CC", mf.Variables[0].Name)
+	assert.Contains(t, mf.Sources, uriFor(common))
+}
+
+func TestResolveInStillRejectsIncludeOutsideWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "project")
+	outside := writeFile(t, parent, "outside.mk", "SECRET := value\n")
+	main := "include ../../outside.mk\n"
+	mainPath := writeFile(t, filepath.Join(workspace, "sub"), "Makefile", main)
+
+	mf := ResolveIn([]lsp.DocumentURI{uriFor(workspace)}, uriFor(mainPath), main, nil)
+
+	assert.Empty(t, mf.Variables)
+	assert.NotContains(t, mf.Sources, uriFor(outside))
+}
+
+func TestResolveInIgnoresNonFileWorkspaceRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "project")
+	writeFile(t, parent, "outside.mk", "SECRET := value\n")
+	main := "include ../outside.mk\n"
+	mainPath := writeFile(t, root, "Makefile", main)
+
+	mf := ResolveIn([]lsp.DocumentURI{"untitled:Untitled-1"}, uriFor(mainPath), main, nil)
+
+	assert.Empty(t, mf.Variables)
 }

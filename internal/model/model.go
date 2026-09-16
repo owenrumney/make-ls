@@ -14,10 +14,23 @@ type Makefile struct {
 	Phonies      map[string]bool
 	PhonyRefs    []*DepRef
 	Comments     []*Comment
+
+	// VarRefs indexes every positioned $(VAR)/${VAR} in the file. Entries are
+	// the same pointers held by Variable.Refs, Directive.VarRefs and the rest.
+	VarRefs []*VarRef
+
+	// Sources holds the exact text each file's ranges were computed from,
+	// keyed by owning URI. Encoding a range against anything else is wrong.
+	Sources map[lsp.DocumentURI]string
+
+	// UnresolvedIncludes are the files this model named, at any depth, but
+	// could not read. Creating one later has to reach this root.
+	UnresolvedIncludes []lsp.DocumentURI
 }
 
 // Target represents a make target rule.
 type Target struct {
+	URI           lsp.DocumentURI
 	Name          string
 	Deps          []*DepRef
 	OrderOnlyDeps []*DepRef
@@ -37,10 +50,14 @@ type Target struct {
 
 	// Target-specific variables
 	Variables []*Variable
+
+	// RecipeRefs are the variable references found in the recipe lines.
+	RecipeRefs []*VarRef
 }
 
 // Variable represents a variable assignment.
 type Variable struct {
+	URI       lsp.DocumentURI
 	Name      string
 	Value     string
 	Op        VarOp
@@ -63,6 +80,10 @@ type Variable struct {
 
 	// VarRefs found in the value.
 	Refs []*VarRef
+
+	// ScopeRefs are references found in TargetScope. Kept apart from Refs so
+	// the undefined-variable diagnostic does not see them.
+	ScopeRefs []*VarRef
 }
 
 // VarOp is the assignment operator.
@@ -86,12 +107,17 @@ const (
 
 // DepRef is a reference to a dependency with positional info.
 type DepRef struct {
+	URI   lsp.DocumentURI
 	Name  string
 	Range lsp.Range
+
+	// Refs are the variable references inside Name, e.g. $(FIGURES).
+	Refs []*VarRef
 }
 
 // VarRef is a reference to a variable (e.g. $(FOO) or ${FOO}).
 type VarRef struct {
+	URI   lsp.DocumentURI
 	Name  string
 	Range lsp.Range
 }
@@ -102,6 +128,7 @@ type Include struct {
 	ResolvedPath string
 	Range        lsp.Range
 	Optional     bool // true for -include / sinclude
+	VarRefs      []*VarRef
 }
 
 // Conditional represents an ifeq/ifneq/ifdef/ifndef block.
@@ -153,10 +180,17 @@ const (
 
 // Define represents a multi-line variable definition (define ... endef).
 type Define struct {
+	URI   lsp.DocumentURI
 	Name  string
 	Op    VarOp
 	Body  string
 	Range lsp.Range
+
+	// NameRange covers the name on the define line; Range covers the block.
+	NameRange lsp.Range
+
+	// BodyRefs are the $(VAR) uses inside Body.
+	BodyRefs []*VarRef
 
 	// Leading modifier, if any: private, export or override.
 	Private  bool

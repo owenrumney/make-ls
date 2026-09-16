@@ -5,6 +5,7 @@ coverage.out
 # VS Code extension
 vscode-make-ls/node_modules/
 vscode-make-ls/out/
+vscode-make-ls/.vscode-test/
 vscode-make-ls/bin/
 vscode-make-ls/*.vsix
 vscode-make-ls/README.md

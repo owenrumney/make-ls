@@ -40,9 +40,6 @@ var (
 	// vpath
 	vpathRe = regexp.MustCompile(`^vpath\s+(.*)$`)
 
-	// Variable references $(VAR) or ${VAR}
-	varRefRe = regexp.MustCompile(`\$[({]([\w.\-]+)[)}]`)
-
 	// .PHONY declaration
 	phonyRe = regexp.MustCompile(`^\.PHONY\s*:\s*(.*)$`)
 )
@@ -57,6 +54,8 @@ func Parse(uri lsp.DocumentURI, text string) *model.Makefile {
 	p.parse()
 	return &model.Makefile{
 		URI:          uri,
+		Sources:      map[lsp.DocumentURI]string{uri: text},
+		VarRefs:      p.varRefs,
 		Targets:      p.targets,
 		Variables:    p.variables,
 		Includes:     p.includes,
@@ -83,6 +82,7 @@ type parser struct {
 	phonies      map[string]bool
 	phonyRefs    []*model.DepRef
 	comments     []*model.Comment
+	varRefs      []*model.VarRef
 
 	// Currently active target for recipe collection.
 	currentTarget *model.Target
@@ -144,6 +144,8 @@ func (p *parser) parseLine() {
 	// Recipe line (tab-prefixed) — must check before anything else.
 	if len(line) > 0 && line[0] == '\t' && p.currentTarget != nil {
 		p.currentTarget.RecipeLines = append(p.currentTarget.RecipeLines, line[1:])
+		// Offsets index the joined line, not line[1:], or every ref is one left.
+		p.currentTarget.RecipeRefs = append(p.currentTarget.RecipeRefs, p.extractVarRefsAtOffset(line, 0, at)...)
 		p.currentTarget.Range.End = lsp.Position{Line: endLine, Character: len(p.lines[endLine])}
 		p.pos++
 		return
@@ -180,7 +182,7 @@ func (p *parser) parseLine() {
 		if colonIdx >= 0 && colonIdx+1 <= len(line) {
 			depsPart = line[colonIdx+1:]
 		}
-		refs := parseDeps(depsPart, colonIdx+1, at)
+		refs := p.parseDeps(depsPart, colonIdx+1, at)
 		for _, ref := range refs {
 			p.phonies[ref.Name] = true
 			p.phonyRefs = append(p.phonyRefs, ref)
@@ -192,7 +194,7 @@ func (p *parser) parseLine() {
 
 	// define ... endef
 	if m := defineRe.FindStringSubmatch(trimmed); m != nil {
-		p.parseDefine(m, startLine)
+		p.parseDefine(m, startLine, line, at)
 		return
 	}
 
@@ -211,15 +213,9 @@ func (p *parser) parseLine() {
 	}
 
 	// include / -include / sinclude
-	if m := includeRe.FindStringSubmatch(trimmed); m != nil {
-		optional := strings.HasPrefix(m[1], "-") || strings.HasPrefix(m[1], "sinclude")
-		for _, path := range splitIncludeArgs(m[2]) {
-			p.includes = append(p.includes, &model.Include{
-				Path:     path,
-				Range:    p.logicalRange(startLine, endLine),
-				Optional: optional,
-			})
-		}
+	if loc := includeRe.FindStringSubmatchIndex(trimmed); loc != nil {
+		optional := strings.HasPrefix(trimmed[loc[2]:loc[3]], "-") || strings.HasPrefix(trimmed[loc[2]:loc[3]], "sinclude")
+		p.addIncludes(trimmed[loc[4]:loc[5]], offsetInLine(line, trimmed)+loc[4], at, optional)
 		p.commentBlock = nil
 		p.pos++
 		return
@@ -245,7 +241,7 @@ func (p *parser) parseLine() {
 			Type:    dirType,
 			Args:    argsStr,
 			Range:   p.logicalRange(startLine, endLine),
-			VarRefs: parseVarNames(argsStr, argsOffset, at),
+			VarRefs: p.parseVarNames(argsStr, argsOffset, at),
 		})
 		p.commentBlock = nil
 		p.pos++
@@ -253,11 +249,13 @@ func (p *parser) parseLine() {
 	}
 
 	// vpath
-	if m := vpathRe.FindStringSubmatch(trimmed); m != nil {
+	if loc := vpathRe.FindStringSubmatchIndex(trimmed); loc != nil {
+		args := trimmed[loc[2]:loc[3]]
 		p.directives = append(p.directives, &model.Directive{
-			Type:  model.DirVpath,
-			Args:  strings.TrimSpace(m[1]),
-			Range: p.logicalRange(startLine, endLine),
+			Type:    model.DirVpath,
+			Args:    strings.TrimSpace(args),
+			Range:   p.logicalRange(startLine, endLine),
+			VarRefs: p.extractVarRefsAtOffset(args, offsetInLine(line, trimmed)+loc[2], at),
 		})
 		p.commentBlock = nil
 		p.pos++
@@ -295,21 +293,29 @@ func (p *parser) parseLine() {
 	}
 
 	// Static pattern rule: targets: target-pattern: prereq-pattern
-	if m := staticPatternRe.FindStringSubmatch(trimmed); m != nil {
+	if loc := staticPatternRe.FindStringSubmatchIndex(trimmed); loc != nil {
+		names := trimmed[loc[2]:loc[3]]
+		targetPattern := trimmed[loc[4]:loc[5]]
+		prereqPattern := trimmed[loc[6]:loc[7]]
 		t := &model.Target{
-			Name:          strings.TrimSpace(m[1]),
-			TargetPattern: strings.TrimSpace(m[2]),
-			PrereqPattern: strings.TrimSpace(m[3]),
+			URI:           p.uri,
+			Name:          strings.TrimSpace(names),
+			TargetPattern: strings.TrimSpace(targetPattern),
+			PrereqPattern: strings.TrimSpace(prereqPattern),
 			IsPattern:     true,
 			DocComment:    p.buildDocComment(),
 			Range:         p.logicalRange(startLine, endLine),
-			NameRange:     nameRange(trimmed, strings.TrimSpace(m[1]), at),
+			NameRange:     nameRange(trimmed, strings.TrimSpace(names), at),
 		}
-		prereqOffset := strings.LastIndex(trimmed, m[3])
-		if prereqOffset < 0 {
-			prereqOffset = 0
-		}
-		t.Deps = parseDeps(m[3], indentOf(line)+prereqOffset, at)
+		// Names and the target pattern expand too; index only, nothing reads
+		// them per-target. Offsets come from the match: the two halves can be
+		// the same text, and searching would put both refs on the first.
+		base := offsetInLine(line, trimmed)
+		p.extractVarRefsAtOffset(names, base+loc[2], at)
+		p.extractVarRefsAtOffset(targetPattern, base+loc[4], at)
+		// PrereqPattern and Deps come from the same text; index it once, via
+		// the deps, or every ref lands in the result twice.
+		t.Deps = p.parseDeps(prereqPattern, base+loc[6], at)
 		p.targets = append(p.targets, t)
 		p.currentTarget = t
 		p.commentBlock = nil
@@ -338,9 +344,13 @@ func (p *parser) parseLine() {
 		depsPart, comments, hasComments = strings.Cut(depsPart, "#")
 
 		// Parse deps, splitting on | for order-only.
-		deps, orderOnly := splitDepsOrderOnly(depsPart, depsColOffset, at)
+		deps, orderOnly := p.splitDepsOrderOnly(depsPart, depsColOffset, at)
+
+		// Target names expand too; index only.
+		p.extractVarRefsAtOffset(m[1], offsetInLine(line, trimmed), at)
 
 		t := &model.Target{
+			URI:           p.uri,
 			Name:          namesPart,
 			Deps:          deps,
 			OrderOnlyDeps: orderOnly,
@@ -404,13 +414,14 @@ func (p *parser) tryParseVarAssign(s string, startLine, endLine int, fullLine st
 	value := s[loc[8]:loc[9]]
 	op := model.VarOp(s[loc[6]:loc[7]])
 	return &model.Variable{
+		URI:       p.uri,
 		Name:      name,
 		Value:     strings.TrimSpace(value),
 		Op:        op,
 		Flavour:   model.FlavourForOp(op),
 		Range:     p.logicalRange(startLine, endLine),
 		NameRange: nameRangeInSegment(fullLine, s, name, at),
-		Refs:      extractVarRefsAtOffset(value, offsetInLine(fullLine, s)+loc[8], at),
+		Refs:      p.extractVarRefsAtOffset(value, offsetInLine(fullLine, s)+loc[8], at),
 	}
 }
 
@@ -442,7 +453,7 @@ func (p *parser) parseExportVar(m []string, startLine, endLine int, fullLine str
 	return true
 }
 
-func (p *parser) parseDefine(m []string, startLine int) {
+func (p *parser) parseDefine(m []string, startLine int, fullLine string, at posFunc) {
 	modifier := m[1]
 	name := m[2]
 	op := model.VarOp("=")
@@ -452,21 +463,37 @@ func (p *parser) parseDefine(m []string, startLine int) {
 
 	p.pos++
 	var body []string
+	var bodyRefs []*model.VarRef
 	for p.pos < len(p.lines) {
 		if strings.TrimSpace(p.lines[p.pos]) == "endef" {
 			break
 		}
 		body = append(body, p.lines[p.pos])
+		// Indexed a line at a time: body lines are never joined, so the
+		// offsets are already physical.
+		bodyRefs = append(bodyRefs, p.extractVarRefsAtOffset(p.lines[p.pos], 0, linePos(p.pos))...)
 		p.pos++
 	}
 
 	endLine := p.pos
 	p.pos++ // skip endef
 
+	// Offsets index the joined header, which is what defineRe matched: a
+	// continuation can split the keyword or push the name onto the next line.
+	nameOff := strings.Index(fullLine, "define") + len("define")
+	nameOff += strings.Index(fullLine[nameOff:], name)
+	nameRange := spanRange(at, nameOff, len(name))
+	// A name split by a continuation would otherwise end past its line.
+	if eol := len(p.lines[nameRange.Start.Line]); nameRange.End.Character > eol {
+		nameRange.End.Character = eol
+	}
+
 	p.defines = append(p.defines, &model.Define{
+		URI:      p.uri,
 		Name:     name,
 		Op:       op,
 		Body:     strings.Join(body, "\n"),
+		BodyRefs: bodyRefs,
 		Private:  modifier == "private",
 		Export:   modifier == "export",
 		Override: modifier == "override",
@@ -474,6 +501,7 @@ func (p *parser) parseDefine(m []string, startLine int) {
 			Start: lsp.Position{Line: startLine, Character: 0},
 			End:   lsp.Position{Line: endLine, Character: len("endef")},
 		},
+		NameRange: nameRange,
 	})
 	p.commentBlock = nil
 }
@@ -484,6 +512,7 @@ func (p *parser) newTargetVar(m []string, line, endLine int, fullLine, trimmed s
 	name := strings.TrimSpace(m[3])
 	valueOffset := offsetInLine(fullLine, trimmed) + len(trimmed) - len(m[5])
 	return &model.Variable{
+		URI:         p.uri,
 		Name:        name,
 		Value:       strings.TrimSpace(m[5]),
 		Op:          op,
@@ -494,7 +523,10 @@ func (p *parser) newTargetVar(m []string, line, endLine int, fullLine, trimmed s
 		Export:      strings.Contains(m[2], "export"),
 		Range:       p.logicalRange(line, endLine),
 		NameRange:   nameRangeInSegment(fullLine, trimmed, name, at),
-		Refs:        extractVarRefsAtOffset(m[5], valueOffset, at),
+		Refs:        p.extractVarRefsAtOffset(m[5], valueOffset, at),
+		// Scope refs stay out of Refs: the undefined-variable diagnostic reads
+		// Refs, and scope text is not a value.
+		ScopeRefs: p.extractVarRefsAtOffset(m[1], offsetInLine(fullLine, trimmed), at),
 	}
 }
 
@@ -508,7 +540,7 @@ func (p *parser) parseConditionalBlock(condType model.ConditionalType, args stri
 	cond := &model.Conditional{
 		Type:    condType,
 		Args:    args,
-		VarRefs: parseConditionalVarRefs(condType, args, p.lines[startLine], linePos(startLine)),
+		VarRefs: p.parseConditionalVarRefs(condType, args, p.lines[startLine], linePos(startLine)),
 		Range: lsp.Range{
 			Start: lsp.Position{Line: startLine, Character: 0},
 		},
@@ -604,7 +636,7 @@ func (p *parser) parseConditionalLine(fullLine string, startLine, endLine int, a
 			Type:    dirType,
 			Args:    argsStr,
 			Range:   p.logicalRange(startLine, endLine),
-			VarRefs: parseVarNames(argsStr, argsOffset, at),
+			VarRefs: p.parseVarNames(argsStr, argsOffset, at),
 		}
 		p.directives = append(p.directives, d)
 		return &model.Node{Directive: d}
@@ -635,34 +667,29 @@ func (p *parser) parseConditionalLine(fullLine string, startLine, endLine int, a
 	}
 
 	// Include
-	if m := includeRe.FindStringSubmatch(trimmed); m != nil {
-		optional := strings.HasPrefix(m[1], "-") || strings.HasPrefix(m[1], "sinclude")
-		path := strings.TrimSpace(m[2])
-		if path == "" {
+	if loc := includeRe.FindStringSubmatchIndex(trimmed); loc != nil {
+		optional := strings.HasPrefix(trimmed[loc[2]:loc[3]], "-") || strings.HasPrefix(trimmed[loc[2]:loc[3]], "sinclude")
+		before := len(p.includes)
+		p.addIncludes(trimmed[loc[4]:loc[5]], offsetInLine(fullLine, trimmed)+loc[4], at, optional)
+		if len(p.includes) == before {
 			return nil
 		}
-		inc := &model.Include{
-			Path:     path,
-			Range:    p.logicalRange(startLine, endLine),
-			Optional: optional,
-		}
-		p.includes = append(p.includes, inc)
-		return &model.Node{Include: inc}
+		return &model.Node{Include: p.includes[before]}
 	}
 
 	return nil
 }
 
-func parseConditionalVarRefs(condType model.ConditionalType, args, fullLine string, at posFunc) []*model.VarRef {
+func (p *parser) parseConditionalVarRefs(condType model.ConditionalType, args, fullLine string, at posFunc) []*model.VarRef {
 	idx := strings.Index(fullLine, args)
 	if idx < 0 {
 		idx = 0
 	}
 	switch condType {
 	case model.CondIfdef, model.CondIfndef:
-		return parseVarNames(args, idx, at)
+		return p.parseVarNames(args, idx, at)
 	case model.CondIfeq, model.CondIfneq:
-		return extractVarRefsAtOffset(args, idx, at)
+		return p.extractVarRefsAtOffset(args, idx, at)
 	default:
 		return nil
 	}
@@ -692,18 +719,18 @@ func (p *parser) buildDocComment() string {
 
 // splitDepsOrderOnly splits a dep string on | into normal and order-only deps.
 // colOffset is the character offset where the dep string starts in the full line.
-func splitDepsOrderOnly(s string, colOffset int, at posFunc) ([]*model.DepRef, []*model.DepRef) {
+func (p *parser) splitDepsOrderOnly(s string, colOffset int, at posFunc) ([]*model.DepRef, []*model.DepRef) {
 	parts := strings.SplitN(s, "|", 2)
-	deps := parseDeps(parts[0], colOffset, at)
+	deps := p.parseDeps(parts[0], colOffset, at)
 	var orderOnly []*model.DepRef
 	if len(parts) > 1 {
 		pipeIdx := strings.Index(s, "|")
-		orderOnly = parseDeps(parts[1], colOffset+pipeIdx+1, at)
+		orderOnly = p.parseDeps(parts[1], colOffset+pipeIdx+1, at)
 	}
 	return deps, orderOnly
 }
 
-func parseDeps(s string, colOffset int, at posFunc) []*model.DepRef {
+func (p *parser) parseDeps(s string, colOffset int, at posFunc) []*model.DepRef {
 	var deps []*model.DepRef
 	offset := 0
 	for _, name := range splitFields(s) {
@@ -711,8 +738,10 @@ func parseDeps(s string, colOffset int, at posFunc) []*model.DepRef {
 		if idx >= 0 {
 			col := colOffset + offset + idx
 			deps = append(deps, &model.DepRef{
+				URI:   p.uri,
 				Name:  name,
 				Range: spanRange(at, col, len(name)),
+				Refs:  p.extractVarRefsAtOffset(name, col, at),
 			})
 			offset = offset + idx + len(name)
 		}
@@ -726,49 +755,181 @@ func parseDeps(s string, colOffset int, at posFunc) []*model.DepRef {
 // strings.Fields returns tokens in left-to-right order and we advance offset
 // past each matched token, a name that is a prefix of another (e.g. "FOO" vs
 // "FOOBAR") is always found at its correct position.
-func parseVarNames(s string, colOffset int, at posFunc) []*model.VarRef {
+func (p *parser) parseVarNames(s string, colOffset int, at posFunc) []*model.VarRef {
 	var refs []*model.VarRef
 	offset := 0
 	for _, name := range splitFields(s) {
 		idx := strings.Index(s[offset:], name)
-		if idx >= 0 {
-			col := colOffset + offset + idx
-			refs = append(refs, &model.VarRef{
-				Name:  name,
-				Range: spanRange(at, col, len(name)),
-			})
-			offset = offset + idx + len(name)
+		if idx < 0 {
+			continue
 		}
+		col := colOffset + offset + idx
+		// export $(NAMES) expands NAMES before selecting variables to export.
+		// Its symbol is the expansion, not the literal "$(NAMES)" variable.
+		if strings.Contains(name, "$(") || strings.Contains(name, "${") {
+			refs = append(refs, p.extractVarRefsAtOffset(name, col, at)...)
+		} else {
+			refs = append(refs, p.varRef(name, at, col, len(name)))
+		}
+		offset += idx + len(name)
 	}
 	return refs
 }
 
-func extractVarRefsAtOffset(s string, colOffset int, at posFunc) []*model.VarRef {
-	matches := varRefRe.FindAllStringSubmatchIndex(s, -1)
-	if matches == nil {
-		return nil
+// varRef is the only way to build a VarRef: it stamps the owning URI and adds
+// the entry to the file-wide index, so a new call site cannot skip either.
+func (p *parser) varRef(name string, at posFunc, offset, n int) *model.VarRef {
+	ref := &model.VarRef{
+		URI:   p.uri,
+		Name:  name,
+		Range: spanRange(at, offset, n),
 	}
+	p.varRefs = append(p.varRefs, ref)
+	return ref
+}
+
+// extractVarRefsAtOffset finds every live $(VAR)/${VAR} in s. A run of n dollar
+// signs is n/2 escaped literals plus, when n is odd, one live $ — so $$(X) is
+// shell syntax and $$$(X) is a reference.
+func (p *parser) extractVarRefsAtOffset(s string, colOffset int, at posFunc) []*model.VarRef {
 	var refs []*model.VarRef
-	for _, m := range matches {
-		name := s[m[2]:m[3]]
-		refs = append(refs, &model.VarRef{
-			Name:  name,
-			Range: spanRange(at, colOffset+m[0], m[1]-m[0]),
-		})
+	for i := 0; i < len(s); i++ {
+		if s[i] != '$' {
+			continue
+		}
+		run := 1
+		for i+run < len(s) && s[i+run] == '$' {
+			run++
+		}
+		last := i + run - 1
+		if run%2 == 1 {
+			if name, end, ok := varRefAt(s, last); ok {
+				refs = append(refs, p.varRef(name, at, colOffset+last, end-last))
+			} else if name, off, n, ok := callRefAt(s, last); ok {
+				refs = append(refs, p.varRef(name, at, colOffset+off, n))
+			}
+		}
+		// Resume inside the reference: a nested $(X), in a substitution's
+		// replacement half or a $(call) argument, is a use in its own right.
+		i = last
 	}
 	return refs
+}
+
+// varRefAt reads the $(NAME)/${NAME} opening at the dollar sign s[i], including
+// a substitution reference $(NAME:pat=repl), whose name ends at the colon. The
+// scan stops at the first byte a name cannot hold: running to end-of-string on
+// every unclosed "$(" would make the caller quadratic.
+func varRefAt(s string, i int) (name string, end int, ok bool) {
+	if i+1 >= len(s) {
+		return "", 0, false
+	}
+	closer := byte(')')
+	switch s[i+1] {
+	case '{':
+		closer = '}'
+	case '(':
+	default:
+		return "", 0, false
+	}
+	for j := i + 2; j < len(s); j++ {
+		switch {
+		case s[j] == closer:
+			if j == i+2 {
+				return "", 0, false
+			}
+			return s[i+2 : j], j + 1, true
+		case s[j] == ':':
+			return substRefAt(s, i, j, closer)
+		case !isVarNameByte(s[j]):
+			return "", 0, false
+		}
+	}
+	return "", 0, false
+}
+
+// substRefAt closes $(NAME:pat=repl), whose name ends at colon. The pattern
+// half holds anything but whitespace, which keeps the scan bounded.
+func substRefAt(s string, i, colon int, closer byte) (name string, end int, ok bool) {
+	if colon == i+2 {
+		return "", 0, false
+	}
+	for j := colon + 1; j < len(s); j++ {
+		switch s[j] {
+		case closer:
+			return s[i+2 : colon], j + 1, true
+		case ' ', '\t':
+			return "", 0, false
+		case '$':
+			// $(SRC:%.c=$(OUTDIR)/%.o): step over the nested reference or the
+			// outer name is lost.
+			_, nestedEnd, nestedOK := varRefAt(s, j)
+			if !nestedOK {
+				return "", 0, false
+			}
+			j = nestedEnd - 1
+		}
+	}
+	return "", 0, false
+}
+
+// callRefAt reads the macro name in $(call NAME,args) at the dollar sign s[i].
+// The symbol under the cursor there is NAME, not call: it is how a define is
+// used, so the name needs its own span in the index.
+func callRefAt(s string, i int) (name string, off, n int, ok bool) {
+	if i+1 >= len(s) || (s[i+1] != '(' && s[i+1] != '{') {
+		return "", 0, 0, false
+	}
+	rest := s[i+2:]
+	if !strings.HasPrefix(rest, "call ") && !strings.HasPrefix(rest, "call\t") {
+		return "", 0, 0, false
+	}
+	j := len("call")
+	for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+		j++
+	}
+	start := j
+	for j < len(rest) && isVarNameByte(rest[j]) {
+		j++
+	}
+	if start == j {
+		return "", 0, 0, false
+	}
+	return rest[start:j], i + 2 + start, j - start, true
+}
+
+func isVarNameByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '_', c == '.', c == '-':
+		return true
+	default:
+		return false
+	}
 }
 
 func splitFields(s string) []string {
 	return strings.Fields(strings.TrimSpace(s))
 }
 
-func splitIncludeArgs(s string) []string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil
+// includeArg is one whitespace-separated include path and its offset in the
+// argument string it was cut from.
+type includeArg struct {
+	Text   string
+	Offset int
+}
+
+func splitIncludeArgs(s string) []includeArg {
+	var parts []includeArg
+	add := func(start, end int) {
+		seg := s[start:end]
+		trimmed := strings.TrimSpace(seg)
+		if trimmed == "" {
+			return
+		}
+		parts = append(parts, includeArg{Text: trimmed, Offset: start + strings.Index(seg, trimmed)})
 	}
-	var parts []string
 	start := 0
 	depth := 0
 	for i := 0; i < len(s); i++ {
@@ -784,9 +945,7 @@ func splitIncludeArgs(s string) []string {
 			}
 		case ' ', '\t':
 			if depth == 0 {
-				if part := strings.TrimSpace(s[start:i]); part != "" {
-					parts = append(parts, part)
-				}
+				add(start, i)
 				for i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\t') {
 					i++
 				}
@@ -794,10 +953,23 @@ func splitIncludeArgs(s string) []string {
 			}
 		}
 	}
-	if part := strings.TrimSpace(s[start:]); part != "" {
-		parts = append(parts, part)
-	}
+	add(start, len(s))
 	return parts
+}
+
+// addIncludes records one Include per path in an include directive's argument
+// list. argsOffset is where args starts in the joined line. Each Include spans
+// only its own path, so go-to-definition picks the path under the cursor.
+func (p *parser) addIncludes(args string, argsOffset int, at posFunc, optional bool) {
+	for _, arg := range splitIncludeArgs(args) {
+		offset := argsOffset + arg.Offset
+		p.includes = append(p.includes, &model.Include{
+			Path:     arg.Text,
+			Range:    spanRange(at, offset, len(arg.Text)),
+			Optional: optional,
+			VarRefs:  p.extractVarRefsAtOffset(arg.Text, offset, at),
+		})
+	}
 }
 
 // posFunc maps an offset in a logical line to a position in the document.

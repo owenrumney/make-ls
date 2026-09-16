@@ -394,16 +394,17 @@ endif
 
 func TestParseDefineModifiers(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		private  bool
-		export   bool
-		override bool
+		name      string
+		input     string
+		private   bool
+		export    bool
+		override  bool
+		nameRange lsp.Range
 	}{
-		{name: "private", input: "private define GREET\nhello\nendef\n", private: true},
-		{name: "export", input: "export define GREET\nhello\nendef\n", export: true},
-		{name: "override", input: "override define GREET\nhello\nendef\n", override: true},
-		{name: "no modifier", input: "define GREET\nhello\nendef\n"},
+		{name: "private", input: "private define GREET\nhello\nendef\n", private: true, nameRange: spanAt(0, 15, 5)},
+		{name: "export", input: "export define GREET\nhello\nendef\n", export: true, nameRange: spanAt(0, 14, 5)},
+		{name: "override", input: "override define GREET\nhello\nendef\n", override: true, nameRange: spanAt(0, 16, 5)},
+		{name: "no modifier", input: "define GREET\nhello\nendef\n", nameRange: spanAt(0, 7, 5)},
 	}
 
 	for _, tt := range tests {
@@ -416,6 +417,7 @@ func TestParseDefineModifiers(t *testing.T) {
 			assert.Equal(t, tt.private, d.Private)
 			assert.Equal(t, tt.export, d.Export)
 			assert.Equal(t, tt.override, d.Override)
+			assert.Equal(t, tt.nameRange, d.NameRange)
 			assert.Empty(t, m.Targets)
 		})
 	}
@@ -482,6 +484,18 @@ func TestParseExportDirectiveSingleVarRefPosition(t *testing.T) {
 	assert.Equal(t, "FOO", d.VarRefs[0].Name)
 	assert.Equal(t, 7, d.VarRefs[0].Range.Start.Character)
 	assert.Equal(t, 10, d.VarRefs[0].Range.End.Character)
+}
+
+func TestParseExportDirectiveExpandedVarName(t *testing.T) {
+	m := Parse(testURI, "export $(NAMES)\n")
+
+	require.Len(t, m.Directives, 1)
+	require.Len(t, m.Directives[0].VarRefs, 1)
+	ref := m.Directives[0].VarRefs[0]
+	assert.Equal(t, "NAMES", ref.Name)
+	assert.Equal(t, spanAt(0, 7, 8), ref.Range)
+	require.Len(t, m.VarRefs, 1)
+	assert.Same(t, ref, m.VarRefs[0])
 }
 
 func TestParseOverrideVar(t *testing.T) {
@@ -860,4 +874,257 @@ include config.mk
 	// Pattern rule.
 	patternTarget := m.Targets[1]
 	assert.True(t, patternTarget.IsPattern)
+}
+
+// --- variable reference index (#41) ---------------------------------------
+
+// varRefsNamed returns the indexed refs for name, in source order.
+func varRefsNamed(m *model.Makefile, name string) []*model.VarRef {
+	var out []*model.VarRef
+	for _, ref := range m.VarRefs {
+		if ref.Name == name {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+func spanAt(line, char, n int) lsp.Range {
+	return lsp.Range{
+		Start: lsp.Position{Line: line, Character: char},
+		End:   lsp.Position{Line: line, Character: char + n},
+	}
+}
+
+// One case per row of the site table in the #41 design doc. A row without a
+// test is a row that will regress.
+func TestVarRefIndexCoversEverySite(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		ref   string
+		want  lsp.Range
+	}{
+		{"assignment value", "OUT := $(CC) -o app\n", "CC", spanAt(0, 7, 5)},
+		{"export", "export PATH\n", "PATH", spanAt(0, 7, 4)},
+		{"ifdef header", "ifdef DEBUG\nA := 1\nendif\n", "DEBUG", spanAt(0, 6, 5)},
+		{"ifeq header", "ifeq ($(DEBUG),1)\nA := 1\nendif\n", "DEBUG", spanAt(0, 6, 8)},
+		{"prerequisite", "all: main.tex $(FIGURES)\n", "FIGURES", spanAt(0, 14, 10)},
+		{"order-only prerequisite", "all: main.tex | $(DIRS)\n", "DIRS", spanAt(0, 16, 7)},
+		{"recipe line", "all:\n\tcp $(SRC) out\n", "SRC", spanAt(1, 4, 6)},
+		{"include path", "include $(DIR)/x.mk\n", "DIR", spanAt(0, 8, 6)},
+		{"target name", "$(PROGS): main.o\n", "PROGS", spanAt(0, 0, 8)},
+		{"static pattern target half", "$(OBJ): $(PFX)%.o: %.c\n", "PFX", spanAt(0, 8, 6)},
+		{"target-specific scope", "$(PROGS): CFLAGS = -g\n", "PROGS", spanAt(0, 0, 8)},
+		{"vpath argument", "vpath %.c $(SRCDIR)\n", "SRCDIR", spanAt(0, 10, 9)},
+		{"phony entry", ".PHONY: $(TARGETS)\n", "TARGETS", spanAt(0, 8, 10)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			refs := varRefsNamed(Parse(testURI, tc.input), tc.ref)
+			require.Len(t, refs, 1)
+			assert.Equal(t, tc.want, refs[0].Range)
+			assert.Equal(t, testURI, refs[0].URI)
+		})
+	}
+}
+
+func TestVarRefIndexAcrossContinuations(t *testing.T) {
+	// The shape both #38 and #41 arrived in.
+	input := "build/main.pdf: main.tex \\\n  $(FIGURES)\n\tlatexmk \\\n\t  -o $(OUT)\n"
+	m := Parse(testURI, input)
+
+	figures := varRefsNamed(m, "FIGURES")
+	require.Len(t, figures, 1)
+	assert.Equal(t, spanAt(1, 2, 10), figures[0].Range)
+
+	out := varRefsNamed(m, "OUT")
+	require.Len(t, out, 1)
+	assert.Equal(t, spanAt(3, 6, 6), out[0].Range)
+}
+
+func TestStaticPatternPrereqIndexedOnce(t *testing.T) {
+	// PrereqPattern and Deps are built from the same text; indexing both would
+	// return two Locations at identical ranges.
+	m := Parse(testURI, "$(OBJ): %.o: %.c $(HDR)\n")
+
+	require.Len(t, varRefsNamed(m, "HDR"), 1)
+	require.Len(t, varRefsNamed(m, "OBJ"), 1)
+}
+
+func TestTargetScopeRefsStayOutOfRefs(t *testing.T) {
+	m := Parse(testURI, "$(PROGS): CFLAGS = -g\n")
+
+	require.Len(t, m.Variables, 1)
+	v := m.Variables[0]
+	assert.Empty(t, v.Refs)
+	require.Len(t, v.ScopeRefs, 1)
+	assert.Equal(t, "PROGS", v.ScopeRefs[0].Name)
+}
+
+func TestDollarEscapes(t *testing.T) {
+	// A run of n dollars is n/2 literals plus, when n is odd, one live $.
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"A := $(X)\n", []string{"X"}},
+		{"A := $$(X)\n", nil},
+		{"A := $$$(X)\n", []string{"X"}},
+		{"A := $$$$(X)\n", nil},
+		{"A := $$(FOO) $$$(BAR)\n", []string{"BAR"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			m := Parse(testURI, tc.input)
+			var names []string
+			for _, ref := range m.VarRefs {
+				names = append(names, ref.Name)
+			}
+			assert.Equal(t, tc.want, names)
+		})
+	}
+}
+
+func TestNestedFunctionCallRefs(t *testing.T) {
+	m := Parse(testURI, "A := $(addprefix $(DIR),$(FIGURES))\n")
+
+	require.Len(t, varRefsNamed(m, "DIR"), 1)
+	require.Len(t, varRefsNamed(m, "FIGURES"), 1)
+	assert.Empty(t, varRefsNamed(m, "addprefix"))
+}
+
+func TestIncludeVarRefsAndSpans(t *testing.T) {
+	m := Parse(testURI, "include a.mk $(DIR)/b.mk\n")
+
+	require.Len(t, m.Includes, 2)
+	assert.Equal(t, "a.mk", m.Includes[0].Path)
+	assert.Equal(t, "$(DIR)/b.mk", m.Includes[1].Path)
+	require.Len(t, m.Includes[1].VarRefs, 1)
+	assert.Equal(t, spanAt(0, 13, 6), m.Includes[1].VarRefs[0].Range)
+
+	// Each path spans only itself, or go-to-definition on the second one opens
+	// the first.
+	assert.Equal(t, spanAt(0, 8, 4), m.Includes[0].Range)
+	assert.Equal(t, spanAt(0, 13, 11), m.Includes[1].Range)
+}
+
+func TestSubstitutionRefIndexed(t *testing.T) {
+	// $(SRC:.c=.o) is a use of SRC; the whole reference is the span.
+	refs := varRefsNamed(Parse(testURI, "SRC := a.c\nOBJ := $(SRC:.c=.o)\n"), "SRC")
+
+	require.Len(t, refs, 1)
+	assert.Equal(t, spanAt(1, 7, 12), refs[0].Range)
+}
+
+func TestSubstitutionRefWithNestedReplacement(t *testing.T) {
+	// The rename idiom: a $ in the replacement half must not cost the base name.
+	m := Parse(testURI, "SRC := a.c\nOBJ := $(SRC:%.c=$(OUTDIR)/%.o)\n")
+
+	src := varRefsNamed(m, "SRC")
+	require.Len(t, src, 1)
+	assert.Equal(t, spanAt(1, 7, 24), src[0].Range)
+	require.Len(t, varRefsNamed(m, "OUTDIR"), 1)
+}
+
+func TestStaticPatternHalvesIndexedAtOwnColumns(t *testing.T) {
+	// Both halves are the same text; searching for it puts both refs on the
+	// first one.
+	refs := varRefsNamed(Parse(testURI, "$(A)%.o: $(A)%.o: %.c\n"), "A")
+
+	require.Len(t, refs, 2)
+	assert.Equal(t, spanAt(0, 0, 4), refs[0].Range)
+	assert.Equal(t, spanAt(0, 9, 4), refs[1].Range)
+}
+
+func TestCallMacroNameIndexed(t *testing.T) {
+	// $(call NAME,...) is how a define is used; the symbol is NAME, not call.
+	m := Parse(testURI, "define greet\n\techo hi\nendef\nall:\n\t$(call greet,x)\n")
+
+	refs := varRefsNamed(m, "greet")
+	require.Len(t, refs, 1)
+	assert.Equal(t, spanAt(4, 8, 5), refs[0].Range)
+	assert.Empty(t, varRefsNamed(m, "call"))
+}
+
+func TestUnclosedVarRefStopsAtInvalidByte(t *testing.T) {
+	// A closer-less "$(" must not scan to end of line: that is quadratic.
+	m := Parse(testURI, "A := $(B $(C $(D\n")
+
+	assert.Empty(t, m.VarRefs)
+}
+
+func TestSourcesHoldsParsedText(t *testing.T) {
+	input := "A := 1\n"
+	m := Parse(testURI, input)
+
+	assert.Equal(t, input, m.Sources[testURI])
+}
+
+func TestParseDefineBodyRefs(t *testing.T) {
+	input := "define build\n\t$(CC) -c\n\techo $(FLAGS)\nendef\n"
+	m := Parse(testURI, input)
+
+	require.Len(t, m.Defines, 1)
+	refs := m.Defines[0].BodyRefs
+	require.Len(t, refs, 2)
+	assert.Equal(t, "CC", refs[0].Name)
+	assert.Equal(t, 1, refs[0].Range.Start.Line)
+	assert.Equal(t, 1, refs[0].Range.Start.Character)
+	assert.Equal(t, "FLAGS", refs[1].Name)
+	assert.Equal(t, 2, refs[1].Range.Start.Line)
+	assert.Equal(t, 6, refs[1].Range.Start.Character)
+
+	assert.Contains(t, m.VarRefs, refs[0], "body refs join the file-wide index")
+}
+
+// The header is matched after continuations are joined, so the name range has
+// to come back through that mapping, not from the first physical line.
+func TestParseDefineNameRangeAcrossContinuations(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  lsp.Range
+	}{
+		{name: "single line", input: "define build\n\techo hi\nendef\n", want: spanAt(0, 7, 5)},
+		{name: "name on next line", input: "define \\\nbuild\n\techo hi\nendef\n", want: spanAt(1, 0, 5)},
+		{name: "keyword split", input: "de\\\nfine build\n\techo hi\nendef\n", want: spanAt(1, 5, 5)},
+		{name: "name split", input: "define b\\\nuild\n\techo hi\nendef\n", want: lsp.Range{
+			Start: lsp.Position{Line: 0, Character: 7},
+			End:   lsp.Position{Line: 0, Character: 9},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Parse(testURI, tt.input)
+			require.Len(t, m.Defines, 1)
+			assert.Equal(t, "build", m.Defines[0].Name)
+			assert.Equal(t, tt.want, m.Defines[0].NameRange)
+		})
+	}
+}
+
+func TestParseDefineNameRangeWithModifier(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  lsp.Range
+	}{
+		{"export", "export define build\n\techo hi\nendef\n", spanAt(0, 14, 5)},
+		{"private", "private define build\n\techo hi\nendef\n", spanAt(0, 15, 5)},
+		{"override", "override define build\n\techo hi\nendef\n", spanAt(0, 16, 5)},
+		{"with op", "define build :=\n\techo hi\nendef\n", spanAt(0, 7, 5)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Parse(testURI, tt.input)
+			require.Len(t, m.Defines, 1)
+			assert.Equal(t, "build", m.Defines[0].Name)
+			assert.Equal(t, tt.want, m.Defines[0].NameRange)
+		})
+	}
 }

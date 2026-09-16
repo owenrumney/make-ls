@@ -16,7 +16,7 @@ A language server for Makefiles. Provides real IDE features — not just syntax 
 | **Diagnostics** | Undefined targets, undefined variables (respects builtins, recursive vars, conditionals), missing `.PHONY` hints |
 | **Code Actions** | Quick-fix to add `.PHONY` declarations |
 | **Formatting** | Tabs in recipes, trim trailing whitespace, ensure final newline |
-| **Include Resolution** | Follows `include` / `-include` / `sinclude` directives, merges symbols across files |
+| **Include Resolution** | Follows `include` / `-include` / `sinclude` directives, merges symbols across files. Included files must sit inside an open workspace folder; paths outside it are ignored |
 
 ## Parser coverage
 

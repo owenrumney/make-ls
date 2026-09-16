@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/owenrumney/go-lsp/lsp"
 	"github.com/owenrumney/go-lsp/servertest"
@@ -68,6 +69,10 @@ func TestInitializeCapabilities(t *testing.T) {
 	require.NotNil(t, caps.HoverProvider)
 	assert.True(t, *caps.HoverProvider)
 	assert.True(t, caps.DocumentSymbolProvider.Enabled())
+}
+
+func TestURIForWindowsPath(t *testing.T) {
+	assert.Equal(t, lsp.DocumentURI("file:///c%3A/Users/owen/Makefile"), uriForPath("C:/Users/owen/Makefile"))
 }
 
 func TestPickPositionEncoding(t *testing.T) {
@@ -843,4 +848,551 @@ func completionLabels(items []lsp.CompletionItem) []string {
 		labels[i] = item.Label
 	}
 	return labels
+}
+
+// --- find references from a use site (#41) --------------------------------
+
+// issueMakefile is the reporter's Makefile from #41, verbatim.
+// line 0: "FIGURES = \"
+// line 1: "  foo \"
+// line 2: "  bar"
+// line 3: ""
+// line 4: "build/main.pdf: main.tex $(FIGURES)"
+// line 5: "\tlatexmk -c $^"
+const issueMakefile = "FIGURES = \\\n  foo \\\n  bar\n\nbuild/main.pdf: main.tex $(FIGURES)\n\tlatexmk -c $^\n"
+
+func TestReferencesSymmetricForVariable(t *testing.T) {
+	harness := newHarness(t)
+	require.NoError(t, harness.DidOpen(testURI, "makefile", issueMakefile))
+
+	want := []lsp.Location{
+		{URI: testURI, Range: lsp.Range{
+			Start: lsp.Position{Line: 0, Character: 0},
+			End:   lsp.Position{Line: 0, Character: 7},
+		}},
+		{URI: testURI, Range: lsp.Range{
+			Start: lsp.Position{Line: 4, Character: 25},
+			End:   lsp.Position{Line: 4, Character: 35},
+		}},
+	}
+
+	fromDecl, err := harness.References(testURI, 0, 2, true)
+	require.NoError(t, err)
+	assert.Equal(t, want, fromDecl)
+
+	fromUse, err := harness.References(testURI, 4, 28, true)
+	require.NoError(t, err)
+	assert.Equal(t, want, fromUse, "a use site must return the same set as the declaration")
+}
+
+func TestReferencesFromRecipeAndIncludePath(t *testing.T) {
+	harness := newHarness(t)
+
+	// line 0: "DIR := src"
+	// line 1: "include $(DIR)/x.mk"
+	// line 2: "all:"
+	// line 3: "\tcp $(DIR)/a ."
+	input := "DIR := src\ninclude $(DIR)/x.mk\nall:\n\tcp $(DIR)/a .\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	fromRecipe, err := harness.References(testURI, 3, 7, true)
+	require.NoError(t, err)
+	require.Len(t, fromRecipe, 3) // declaration + include path + recipe
+
+	fromInclude, err := harness.References(testURI, 1, 11, true)
+	require.NoError(t, err)
+	assert.Equal(t, fromRecipe, fromInclude)
+}
+
+func TestReferencesFromDependencyName(t *testing.T) {
+	harness := newHarness(t)
+
+	input := "all: build\n\nbuild:\n\tgo build\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	// Cursor on the "build" dependency, a use of the target.
+	locs, err := harness.References(testURI, 0, 6, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2) // declaration + the dependency itself
+}
+
+func TestReferencesConditionalHeaderExcludeDecl(t *testing.T) {
+	harness := newHarness(t)
+
+	// line 0: "DEBUG := 1"
+	// line 1: "ifdef DEBUG"
+	input := "DEBUG := 1\nifdef DEBUG\nA := 1\nendif\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	withDecl, err := harness.References(testURI, 1, 8, true)
+	require.NoError(t, err)
+	require.Len(t, withDecl, 2)
+
+	withoutDecl, err := harness.References(testURI, 1, 8, false)
+	require.NoError(t, err)
+	require.Len(t, withoutDecl, 1)
+	assert.Equal(t, 1, withoutDecl[0].Range.Start.Line)
+}
+
+func TestReferencesIgnoresFunctionNames(t *testing.T) {
+	harness := newHarness(t)
+
+	input := "SRC := a.c\nOBJ := $(patsubst %.c,%.o,$(SRC))\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 1, 10, true)
+	require.NoError(t, err)
+	assert.Empty(t, locs)
+}
+
+func TestBuiltinCallIsNotAVariableUse(t *testing.T) {
+	harness := newHarness(t)
+
+	// wildcard is a builtin, but it is also a variable here.
+	input := "wildcard := foo\nA := $(wildcard *.c)\nB := $(wildcard)\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	t.Run("a call with arguments resolves to nothing", func(t *testing.T) {
+		defs, err := harness.Definition(testURI, 1, 8)
+		require.NoError(t, err)
+		assert.Empty(t, defs)
+
+		refs, err := harness.References(testURI, 1, 8, true)
+		require.NoError(t, err)
+		assert.Empty(t, refs)
+	})
+
+	t.Run("a bare use resolves to the variable", func(t *testing.T) {
+		defs, err := harness.Definition(testURI, 2, 8)
+		require.NoError(t, err)
+		require.Len(t, defs, 1)
+		assert.Equal(t, 0, defs[0].Range.Start.Line)
+
+		refs, err := harness.References(testURI, 2, 8, true)
+		require.NoError(t, err)
+		require.Len(t, refs, 2) // declaration + the bare use
+	})
+}
+
+// --- cross-file ------------------------------------------------------------
+
+// writeProject writes a root Makefile including common.mk and returns both URIs.
+func writeProject(t *testing.T, root, include string) (dir string, rootURI, incURI lsp.DocumentURI) {
+	t.Helper()
+	dir = t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "common.mk"), []byte(include), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Makefile"), []byte(root), 0o600))
+	// uriForPath is what the handler itself uses; concatenating "file://" only
+	// agrees with it while the temp path stays plain ASCII.
+	return dir,
+		uriForPath(filepath.Join(dir, "Makefile")),
+		uriForPath(filepath.Join(dir, "common.mk"))
+}
+
+func TestDefinitionAcrossIncludeUsesOwningURI(t *testing.T) {
+	harness := newHarness(t)
+	_, rootURI, incURI := writeProject(t, "include common.mk\nOUT := $(CC) -o app\n", "CC := gcc\n")
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", "include common.mk\nOUT := $(CC) -o app\n"))
+
+	locs, err := harness.Definition(rootURI, 1, 9)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, incURI, locs[0].URI)
+	assert.Equal(t, lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 0},
+		End:   lsp.Position{Line: 0, Character: 2},
+	}, locs[0].Range)
+}
+
+func TestReferencesAcrossIncludeUsesOwningURI(t *testing.T) {
+	harness := newHarness(t)
+	root := "include common.mk\nOUT := $(CC) -o app\n"
+	_, rootURI, incURI := writeProject(t, root, "CC := gcc\n")
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+
+	locs, err := harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2)
+	assert.Equal(t, incURI, locs[0].URI, "declaration belongs to the included file")
+	assert.Equal(t, rootURI, locs[1].URI)
+}
+
+func TestReferencesFromInsideIncludeSeeRootUses(t *testing.T) {
+	harness := newHarness(t)
+	root := "include common.mk\nOUT := $(CC) -o app\n"
+	include := "CC := gcc\n"
+	_, rootURI, incURI := writeProject(t, root, include)
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+	require.NoError(t, harness.DidOpen(incURI, "makefile", include))
+
+	fromRoot, err := harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, fromRoot, 2)
+
+	// Same symbol, cursor on the declaration in the include this time.
+	fromInclude, err := harness.References(incURI, 0, 1, true)
+	require.NoError(t, err)
+	assert.Equal(t, fromRoot, fromInclude, "the root's use must not depend on where the cursor sits")
+}
+
+func TestDefinitionFromIncludeFindsRootDefinition(t *testing.T) {
+	harness := newHarness(t)
+	root := "include common.mk\nCC := gcc\n"
+	include := "OUT := $(CC)\n"
+	_, rootURI, incURI := writeProject(t, root, include)
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+	require.NoError(t, harness.DidOpen(incURI, "makefile", include))
+
+	locs, err := harness.Definition(incURI, 0, 9)
+	require.NoError(t, err)
+	require.Len(t, locs, 1)
+	assert.Equal(t, rootURI, locs[0].URI)
+	assert.Equal(t, 1, locs[0].Range.Start.Line)
+}
+
+func TestDiagnosticsRoutedToOwningFile(t *testing.T) {
+	harness := newHarness(t)
+	root := "include common.mk\n"
+	// The root is one line long, so line 1 only exists in the include.
+	_, rootURI, incURI := writeProject(t, root, "\nBAD := $(NOPE)\n")
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+	require.NoError(t, harness.DidSave(rootURI))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	diags, err := harness.WaitForDiagnostics(ctx, incURI)
+	require.NoError(t, err)
+	require.Len(t, diags, 1)
+	assert.Contains(t, diags[0].Message, "NOPE")
+	assert.Equal(t, 1, diags[0].Range.Start.Line)
+}
+
+// waitForDiagnosticCount waits until uri reports want diagnostics, and returns
+// them. Any publish for uri unblocks the wait, so a stale set is retried.
+func waitForDiagnosticCount(t *testing.T, harness *servertest.Harness, uri lsp.DocumentURI, want int) []lsp.Diagnostic {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		diags, err := harness.WaitForDiagnostics(ctx, uri)
+		cancel()
+		require.NoError(t, err, "waiting for %d diagnostics on %s", want, uri)
+		if len(diags) == want {
+			return diags
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s has %d diagnostics, want %d", uri, len(diags), want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestDiagnosticsPublishedOnOpen(t *testing.T) {
+	harness := newHarness(t)
+	require.NoError(t, harness.DidOpen(testURI, "makefile", "A := $(NOPE)\n"))
+
+	diags := waitForDiagnosticCount(t, harness, testURI, 1)
+	assert.Contains(t, diags[0].Message, "NOPE")
+}
+
+func TestDiagnosticsClearedWhenIncludeDropsOut(t *testing.T) {
+	harness := newHarness(t)
+	root := "include common.mk\n"
+	_, rootURI, incURI := writeProject(t, root, "X := $(UNDEF)\n")
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+	waitForDiagnosticCount(t, harness, incURI, 1)
+
+	// Dropping the include drops the file from the model; nothing else can
+	// clear the warning it left in the editor.
+	require.NoError(t, harness.DidChange(rootURI, 2, "\n"))
+	waitForDiagnosticCount(t, harness, incURI, 0)
+}
+
+func TestDiagnosticsUnionAcrossRoots(t *testing.T) {
+	harness := newHarness(t)
+	dir := t.TempDir()
+	write := func(name, text string) lsp.DocumentURI {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600))
+		return uriForPath(filepath.Join(dir, name))
+	}
+	incURI := write("common.mk", "X := $(UNDEF)\n")
+	a, b := "include common.mk\n", "UNDEF := 1\ninclude common.mk\n"
+	aURI, bURI := write("a.mk", a), write("b.mk", b)
+
+	require.NoError(t, harness.DidOpen(aURI, "makefile", a))
+	require.NoError(t, harness.DidOpen(bURI, "makefile", b))
+	waitForDiagnosticCount(t, harness, incURI, 1)
+
+	// b.mk defines UNDEF, so its own model is clean — but publishing is a full
+	// replace per URI, and a.mk's finding must survive saving b.mk.
+	require.NoError(t, harness.DidSave(bURI))
+	waitForDiagnosticCount(t, harness, incURI, 1)
+}
+
+// --- include freshness -----------------------------------------------------
+
+func TestReferencesSeeUnsavedIncludeBuffer(t *testing.T) {
+	harness := newHarness(t)
+	root := "include common.mk\nOUT := $(CC)\n"
+	_, rootURI, incURI := writeProject(t, root, "CC := gcc\n")
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+
+	// Add a second definition in the buffer only — never written to disk.
+	require.NoError(t, harness.DidOpen(incURI, "makefile", "CC := gcc\nCC := clang\n"))
+	locs, err := harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 3) // two declarations + the use
+
+	// Closing the buffer falls back to disk.
+	require.NoError(t, harness.DidClose(incURI))
+	locs, err = harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2)
+}
+
+func TestWatchedFileChangeReresolvesDependents(t *testing.T) {
+	harness := newHarness(t)
+	root := "include common.mk\nOUT := $(CC)\n"
+	dir, rootURI, incURI := writeProject(t, root, "CC := gcc\n")
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "common.mk"), []byte("CC := gcc\nCC := clang\n"), 0o600))
+	require.NoError(t, harness.DidChangeWatchedFiles(&lsp.DidChangeWatchedFilesParams{
+		Changes: []lsp.FileEvent{{URI: incURI, Type: lsp.FileChanged}},
+	}))
+
+	locs, err := harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 3)
+}
+
+func TestRegistersWatchersOnFirstDidOpen(t *testing.T) {
+	h := New()
+	params := &lsp.InitializeParams{
+		Capabilities: lsp.ClientCapabilities{
+			Workspace: &lsp.WorkspaceClientCapabilities{
+				DidChangeWatchedFiles: &lsp.DynamicRegistrationCapability{DynamicRegistration: boolPtr(true)},
+			},
+		},
+	}
+	harness := servertest.New(t, h, servertest.WithInitializeParams(params))
+	require.NoError(t, harness.DidOpen(testURI, "makefile", "all:\n\techo hi\n"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := harness.WaitForClientRequest(ctx, "client/registerCapability")
+	require.NoError(t, err)
+	assert.Contains(t, string(req.Params), "workspace/didChangeWatchedFiles")
+	assert.Contains(t, string(req.Params), "GNUmakefile", "the extension registers GNUmakefile too")
+}
+
+func TestWatchRegistrationClaimedOnce(t *testing.T) {
+	h := New()
+	h.watchDynamic = true
+
+	require.True(t, h.claimWatchRegistration())
+	assert.False(t, h.claimWatchRegistration(), "a second DidOpen must not re-send while one is in flight")
+
+	h.finishWatchRegistration(true)
+	assert.False(t, h.claimWatchRegistration(), "a registration the client accepted is never repeated")
+
+	h.finishWatchRegistration(false)
+	assert.True(t, h.claimWatchRegistration(), "a registration the client refused is retried")
+}
+
+func TestCreatedIncludeReachesRoot(t *testing.T) {
+	harness := newHarness(t)
+	dir := t.TempDir()
+	root := "include common.mk\nOUT := $(CC)\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Makefile"), []byte(root), 0o600))
+	rootURI := uriForPath(filepath.Join(dir, "Makefile"))
+	incURI := uriForPath(filepath.Join(dir, "common.mk"))
+
+	// common.mk does not exist yet: the edge has to come from the unresolved
+	// include the resolver reported.
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+	locs, err := harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 1, "only the use; nothing declares CC yet")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "common.mk"), []byte("CC := gcc\n"), 0o600))
+	require.NoError(t, harness.DidChangeWatchedFiles(&lsp.DidChangeWatchedFilesParams{
+		Changes: []lsp.FileEvent{{URI: incURI, Type: lsp.FileCreated}},
+	}))
+
+	locs, err = harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "the created include must reach the root")
+	assert.Equal(t, incURI, locs[0].URI)
+}
+
+func TestCreatedTransitiveIncludeReachesRoot(t *testing.T) {
+	harness := newHarness(t)
+	dir := t.TempDir()
+	root := "include a.mk\nOUT := $(CC)\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Makefile"), []byte(root), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.mk"), []byte("include b.mk\n"), 0o600))
+	rootURI := uriForPath(filepath.Join(dir, "Makefile"))
+	bURI := uriForPath(filepath.Join(dir, "b.mk"))
+
+	// b.mk is named by a.mk, not by the root: only the resolver ever sees it.
+	require.NoError(t, harness.DidOpen(rootURI, "makefile", root))
+	locs, err := harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 1, "only the use; nothing declares CC yet")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.mk"), []byte("CC := gcc\n"), 0o600))
+	require.NoError(t, harness.DidChangeWatchedFiles(&lsp.DidChangeWatchedFilesParams{
+		Changes: []lsp.FileEvent{{URI: bURI, Type: lsp.FileCreated}},
+	}))
+
+	locs, err = harness.References(rootURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "an include two levels down must reach the root")
+}
+
+func TestReferencesOnExpandedExportVariable(t *testing.T) {
+	harness := newHarness(t)
+	require.NoError(t, harness.DidOpen(testURI, "makefile", "NAMES := FOO\nexport $(NAMES)\n"))
+
+	locs, err := harness.References(testURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "the declaration and expanded export use")
+}
+
+func TestReferencesOnCallMacroSite(t *testing.T) {
+	harness := newHarness(t)
+	// line 4: "\t$(call greet,x)", line 5: "\t$(greet)"
+	input := "define greet\n\techo hi\nendef\nall:\n\t$(call greet,x)\n\t$(greet)\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	fromCall, err := harness.References(testURI, 4, 9, true)
+	require.NoError(t, err)
+	require.Len(t, fromCall, 3, "the define, the $(call) site and the bare use")
+
+	defs, err := harness.Definition(testURI, 4, 9)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 0, defs[0].Range.Start.Line)
+}
+
+func TestReferencesOnSubstitutionReference(t *testing.T) {
+	harness := newHarness(t)
+	// line 1: "OBJ := $(SRC:%.c=%.o)" — cursor on SRC inside the substitution.
+	input := "SRC := a.c\nOBJ := $(SRC:%.c=%.o)\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 1, 9, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "the declaration and the substitution use")
+
+	defs, err := harness.Definition(testURI, 1, 9)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 0, defs[0].Range.Start.Line)
+}
+
+func TestReferencesInsideDefineBody(t *testing.T) {
+	harness := newHarness(t)
+	// line 2: "\t$(CC) -o $@ $<" inside the define body.
+	input := "CC := gcc\ndefine build\n\t$(CC) -o $@ $<\nendef\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 0, 0, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "the declaration and the use in the define body")
+
+	fromBody, err := harness.References(testURI, 2, 4, true)
+	require.NoError(t, err)
+	require.Len(t, fromBody, 2, "the same pair, asked from inside the body")
+
+	defs, err := harness.Definition(testURI, 2, 4)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 0, defs[0].Range.Start.Line)
+}
+
+func TestDefinitionOnDefineName(t *testing.T) {
+	harness := newHarness(t)
+	require.NoError(t, harness.DidOpen(testURI, "makefile", "define build\n\techo hi\nendef\n"))
+
+	defs, err := harness.Definition(testURI, 0, 8)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 0, defs[0].Range.Start.Line)
+	assert.Equal(t, 7, defs[0].Range.Start.Character, "the name, not the block")
+	assert.Equal(t, 12, defs[0].Range.End.Character)
+}
+
+func TestDefinitionOnDefineKeyword(t *testing.T) {
+	harness := newHarness(t)
+	require.NoError(t, harness.DidOpen(testURI, "makefile", "define build\n\techo hi\nendef\n"))
+
+	// The keyword is not the name: only the name resolves to the define.
+	defs, err := harness.Definition(testURI, 0, 2)
+	require.NoError(t, err)
+	assert.Empty(t, defs)
+}
+
+func TestReferencesOnSubstitutionReferenceInPrerequisite(t *testing.T) {
+	harness := newHarness(t)
+	// line 1: "all: $(SRC:%.c=%.o)" — cursor on SRC inside the prerequisite.
+	input := "SRC := a.c\nall: $(SRC:%.c=%.o)\n\techo hi\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 1, 7, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2, "the declaration and the use, not the prerequisite span")
+	assert.Equal(t, 0, locs[0].Range.Start.Line, "the SRC declaration")
+	assert.Equal(t, 1, locs[1].Range.Start.Line, "the use inside the prerequisite")
+}
+
+func TestReferencesOnSubstitutionReferenceSeeSiblingUse(t *testing.T) {
+	harness := newHarness(t)
+	// line 1: "app: $(SRC:%.c=%.o)" — the prerequisite is also a variable use.
+	input := "SRC := a.c\napp: $(SRC:%.c=%.o)\nCFLAGS := $(SRC)\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 1, 8, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 3, "the declaration and both uses, not the prerequisite")
+	assert.Equal(t, 2, locs[2].Range.Start.Line, "the sibling $(SRC) use")
+}
+
+func TestReferencesReportDefineDeclarationAsName(t *testing.T) {
+	harness := newHarness(t)
+	input := "define build\n\techo hi\nendef\nall:\n\t$(build)\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 4, 4, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2)
+	assert.Equal(t, 0, locs[0].Range.Start.Line, "the declaration is the name, not the block")
+	assert.Equal(t, 7, locs[0].Range.Start.Character)
+	assert.Equal(t, 12, locs[0].Range.End.Character)
+}
+
+func TestDefinitionAcrossParentDirectoryIncludeInWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "common.mk"), []byte("CC := gcc\n"), 0o600))
+	sub := filepath.Join(workspace, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0o750))
+	mainPath := filepath.Join(sub, "Makefile")
+	main := "include ../common.mk\nall:\n\t$(CC) -v\n"
+	require.NoError(t, os.WriteFile(mainPath, []byte(main), 0o600))
+
+	workspaceURI := uriForPath(workspace)
+	h := New()
+	harness := servertest.New(t, h, servertest.WithInitializeParams(&lsp.InitializeParams{
+		WorkspaceFolders: []lsp.WorkspaceFolder{{URI: workspaceURI, Name: "ws"}},
+	}))
+	mainURI := uriForPath(mainPath)
+	require.NoError(t, harness.DidOpen(mainURI, "makefile", main))
+
+	// Cursor on $(CC) in the recipe resolves into the parent-directory include.
+	defs, err := harness.Definition(mainURI, 2, 4)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, uriForPath(filepath.Join(workspace, "common.mk")), defs[0].URI)
 }

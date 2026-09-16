@@ -308,3 +308,41 @@ func TestResolveFallsBackToDiskWhenProviderMisses(t *testing.T) {
 	assert.Equal(t, "gcc", mf.Variables[0].Value)
 	assert.Equal(t, "CC := gcc\n", mf.Sources[uriFor(filepath.Join(dir, "config.mk"))])
 }
+
+func TestResolveInAllowsIncludeWithinWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	common := writeFile(t, workspace, "common.mk", "CC := gcc\n")
+	main := "include ../common.mk\n"
+	mainPath := writeFile(t, filepath.Join(workspace, "sub"), "Makefile", main)
+
+	mf := ResolveIn([]lsp.DocumentURI{uriFor(workspace)}, uriFor(mainPath), main, nil)
+
+	require.Len(t, mf.Variables, 1)
+	assert.Equal(t, "CC", mf.Variables[0].Name)
+	assert.Contains(t, mf.Sources, uriFor(common))
+}
+
+func TestResolveInStillRejectsIncludeOutsideWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "project")
+	outside := writeFile(t, parent, "outside.mk", "SECRET := value\n")
+	main := "include ../../outside.mk\n"
+	mainPath := writeFile(t, filepath.Join(workspace, "sub"), "Makefile", main)
+
+	mf := ResolveIn([]lsp.DocumentURI{uriFor(workspace)}, uriFor(mainPath), main, nil)
+
+	assert.Empty(t, mf.Variables)
+	assert.NotContains(t, mf.Sources, uriFor(outside))
+}
+
+func TestResolveInIgnoresNonFileWorkspaceRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "project")
+	writeFile(t, parent, "outside.mk", "SECRET := value\n")
+	main := "include ../outside.mk\n"
+	mainPath := writeFile(t, root, "Makefile", main)
+
+	mf := ResolveIn([]lsp.DocumentURI{"untitled:Untitled-1"}, uriFor(mainPath), main, nil)
+
+	assert.Empty(t, mf.Variables)
+}

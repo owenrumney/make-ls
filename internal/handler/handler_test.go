@@ -1347,3 +1347,52 @@ func TestReferencesOnSubstitutionReferenceInPrerequisite(t *testing.T) {
 	assert.Equal(t, 0, locs[0].Range.Start.Line, "the SRC declaration")
 	assert.Equal(t, 1, locs[1].Range.Start.Line, "the use inside the prerequisite")
 }
+
+func TestReferencesOnSubstitutionReferenceSeeSiblingUse(t *testing.T) {
+	harness := newHarness(t)
+	// line 1: "app: $(SRC:%.c=%.o)" — the prerequisite is also a variable use.
+	input := "SRC := a.c\napp: $(SRC:%.c=%.o)\nCFLAGS := $(SRC)\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 1, 8, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 3, "the declaration and both uses, not the prerequisite")
+	assert.Equal(t, 2, locs[2].Range.Start.Line, "the sibling $(SRC) use")
+}
+
+func TestReferencesReportDefineDeclarationAsName(t *testing.T) {
+	harness := newHarness(t)
+	input := "define build\n\techo hi\nendef\nall:\n\t$(build)\n"
+	require.NoError(t, harness.DidOpen(testURI, "makefile", input))
+
+	locs, err := harness.References(testURI, 4, 4, true)
+	require.NoError(t, err)
+	require.Len(t, locs, 2)
+	assert.Equal(t, 0, locs[0].Range.Start.Line, "the declaration is the name, not the block")
+	assert.Equal(t, 7, locs[0].Range.Start.Character)
+	assert.Equal(t, 12, locs[0].Range.End.Character)
+}
+
+func TestDefinitionAcrossParentDirectoryIncludeInWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "common.mk"), []byte("CC := gcc\n"), 0o600))
+	sub := filepath.Join(workspace, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0o750))
+	mainPath := filepath.Join(sub, "Makefile")
+	main := "include ../common.mk\nall:\n\t$(CC) -v\n"
+	require.NoError(t, os.WriteFile(mainPath, []byte(main), 0o600))
+
+	workspaceURI := uriForPath(workspace)
+	h := New()
+	harness := servertest.New(t, h, servertest.WithInitializeParams(&lsp.InitializeParams{
+		WorkspaceFolders: []lsp.WorkspaceFolder{{URI: workspaceURI, Name: "ws"}},
+	}))
+	mainURI := uriForPath(mainPath)
+	require.NoError(t, harness.DidOpen(mainURI, "makefile", main))
+
+	// Cursor on $(CC) in the recipe resolves into the parent-directory include.
+	defs, err := harness.Definition(mainURI, 2, 4)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, uriForPath(filepath.Join(workspace, "common.mk")), defs[0].URI)
+}

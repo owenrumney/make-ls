@@ -22,11 +22,18 @@ type SourceOf func(lsp.DocumentURI) (string, bool)
 // skipped. Optional includes (-include / sinclude) silently skip missing files.
 // A nil src means disk only.
 func Resolve(uri lsp.DocumentURI, text string, src SourceOf) *model.Makefile {
+	return ResolveIn(nil, uri, text, src)
+}
+
+// ResolveIn is Resolve with the client's workspace folders as extra roots, so
+// a Makefile in a subdirectory can reach "include ../common.mk". Without them
+// the only root is the Makefile's own directory.
+func ResolveIn(workspace []lsp.DocumentURI, uri lsp.DocumentURI, text string, src SourceOf) *model.Makefile {
 	dir := dirFromURI(uri)
 	r := &resolver{
-		seen:    map[string]bool{},
-		src:     src,
-		rootDir: canonicalPath(dir),
+		seen:  map[string]bool{},
+		src:   src,
+		roots: rootsFor(dir, workspace),
 	}
 	root := parser.Parse(uri, text)
 	r.seen[string(uri)] = true
@@ -48,9 +55,9 @@ func ResolveFromDisk(uri lsp.DocumentURI) (*model.Makefile, error) {
 }
 
 type resolver struct {
-	seen    map[string]bool // visited URIs to detect circular includes
-	src     SourceOf
-	rootDir string
+	seen  map[string]bool // visited URIs to detect circular includes
+	src   SourceOf
+	roots []string // directory trees includes may read from
 
 	// unresolved collects includes at any depth that named a file with no
 	// readable content; merge drops child.Includes, so nothing else carries
@@ -93,8 +100,8 @@ func (r *resolver) resolve(mf *model.Makefile, baseDir string) {
 const maxIncludeSize = 4 << 20
 
 // sourceFor prefers an open buffer over disk, so ranges and text always come
-// from the same bytes. Includes are confined to the root Makefile's directory
-// tree and disk reads accept only bounded regular files.
+// from the same bytes. Includes are confined to the resolver's roots and disk
+// reads accept only bounded regular files.
 func (r *resolver) sourceFor(uri lsp.DocumentURI, path string) (text string, ok bool) {
 	if !r.pathAllowed(path) {
 		return "", false
@@ -105,7 +112,7 @@ func (r *resolver) sourceFor(uri lsp.DocumentURI, path string) (text string, ok 
 		}
 	}
 
-	// #nosec G304 -- path has been confined to the root Makefile tree above.
+	// #nosec G304 -- path has been confined to the resolver roots above.
 	file, err := os.Open(path)
 	if err != nil {
 		return "", false
@@ -137,7 +144,24 @@ func canonicalPath(path string) string {
 }
 
 func (r *resolver) pathAllowed(path string) bool {
-	return pathWithin(r.rootDir, canonicalPath(path))
+	canon := canonicalPath(path)
+	for _, root := range r.roots {
+		if pathWithin(root, canon) {
+			return true
+		}
+	}
+	return false
+}
+
+func rootsFor(dir string, workspace []lsp.DocumentURI) []string {
+	roots := []string{canonicalPath(dir)}
+	for _, w := range workspace {
+		if !strings.HasPrefix(string(w), "file://") {
+			continue
+		}
+		roots = append(roots, canonicalPath(pathFromURI(w)))
+	}
+	return roots
 }
 
 func pathWithin(root, path string) bool {

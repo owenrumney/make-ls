@@ -1106,3 +1106,25 @@ func TestParseDefineNameRangeAcrossContinuations(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDefineNameRangeWithModifier(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  lsp.Range
+	}{
+		{"export", "export define build\n\techo hi\nendef\n", spanAt(0, 14, 5)},
+		{"private", "private define build\n\techo hi\nendef\n", spanAt(0, 15, 5)},
+		{"override", "override define build\n\techo hi\nendef\n", spanAt(0, 16, 5)},
+		{"with op", "define build :=\n\techo hi\nendef\n", spanAt(0, 7, 5)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Parse(testURI, tt.input)
+			require.Len(t, m.Defines, 1)
+			assert.Equal(t, "build", m.Defines[0].Name)
+			assert.Equal(t, tt.want, m.Defines[0].NameRange)
+		})
+	}
+}

@@ -38,6 +38,10 @@ type Handler struct {
 	// each finding and already encoded against that file's text.
 	diags map[lsp.DocumentURI]map[lsp.DocumentURI][]lsp.Diagnostic
 
+	// workspaceRoots are the folders the client opened. Includes may reach
+	// anywhere inside them, not just under the Makefile's own directory.
+	workspaceRoots []lsp.DocumentURI
+
 	// watchDynamic is set when the client can register watchers at runtime.
 	// watchRegistered latches only once the client has accepted the request.
 	watchDynamic    bool
@@ -97,6 +101,7 @@ func (h *Handler) Initialize(_ context.Context, params *lsp.InitializeParams) (*
 	h.mu.Lock()
 	h.encoding = positionEncoding
 	h.watchDynamic = supportsWatchedFiles(clientCaps)
+	h.workspaceRoots = workspaceRoots(params)
 	h.mu.Unlock()
 	return &lsp.InitializeResult{
 		Capabilities: lsp.ServerCapabilities{
@@ -123,6 +128,28 @@ func (h *Handler) Initialize(_ context.Context, params *lsp.InitializeParams) (*
 			Version: "0.1.0",
 		},
 	}, nil
+}
+
+// workspaceRoots reads the folders the client opened, preferring
+// workspaceFolders and falling back to the deprecated rootUri and rootPath.
+func workspaceRoots(params *lsp.InitializeParams) []lsp.DocumentURI {
+	if params == nil {
+		return nil
+	}
+	if len(params.WorkspaceFolders) > 0 {
+		roots := make([]lsp.DocumentURI, 0, len(params.WorkspaceFolders))
+		for _, f := range params.WorkspaceFolders {
+			roots = append(roots, f.URI)
+		}
+		return roots
+	}
+	if params.RootURI != nil && *params.RootURI != "" {
+		return []lsp.DocumentURI{*params.RootURI}
+	}
+	if params.RootPath != nil && *params.RootPath != "" {
+		return []lsp.DocumentURI{uriForPath(*params.RootPath)}
+	}
+	return nil
 }
 
 // Shutdown handles the shutdown request.
@@ -719,7 +746,7 @@ func conditionalName(c *model.Conditional) string {
 func (h *Handler) parseAndResolve(uri lsp.DocumentURI, text string) *model.Makefile {
 	mf := parser.Parse(uri, text)
 	if len(mf.Includes) > 0 && strings.HasPrefix(string(uri), "file://") {
-		return resolver.Resolve(uri, text, func(inc lsp.DocumentURI) (string, bool) {
+		return resolver.ResolveIn(h.workspaceRoots, uri, text, func(inc lsp.DocumentURI) (string, bool) {
 			s, ok := h.docs[inc]
 			return s, ok
 		})
@@ -1133,7 +1160,7 @@ func findVarReferences(mf *model.Makefile, name string, includeDecl bool, le *lo
 		}
 		for _, d := range mf.Defines {
 			if d.Name == name {
-				locs = append(locs, le.loc(d.URI, d.Range))
+				locs = append(locs, le.loc(d.URI, d.NameRange))
 			}
 		}
 	}

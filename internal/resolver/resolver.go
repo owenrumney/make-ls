@@ -95,7 +95,7 @@ const maxIncludeSize = 4 << 20
 // sourceFor prefers an open buffer over disk, so ranges and text always come
 // from the same bytes. Includes are confined to the root Makefile's directory
 // tree and disk reads accept only bounded regular files.
-func (r *resolver) sourceFor(uri lsp.DocumentURI, path string) (string, bool) {
+func (r *resolver) sourceFor(uri lsp.DocumentURI, path string) (text string, ok bool) {
 	if !r.pathAllowed(path) {
 		return "", false
 	}
@@ -110,7 +110,11 @@ func (r *resolver) sourceFor(uri lsp.DocumentURI, path string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			text, ok = "", false
+		}
+	}()
 
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxIncludeSize {

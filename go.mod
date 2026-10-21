@@ -1,6 +1,6 @@
 module github.com/owenrumney/make-ls
 
-go 1.26
+go 1.26.10
 
 require github.com/owenrumney/go-lsp v0.2.5
 
